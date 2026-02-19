@@ -3,6 +3,11 @@ This script refines the dataset by generating accurate, row-by-row motion labels
 It loads the feature set, calculates the change in distance for each measurement,
 and assigns a 'approaching', 'receding', or 'stationary' label to each row.
 """
+
+# Import necessary libraries
+import pandas as pd  # For data manipulation
+import numpy as np   # For numerical operations
+import os           # For file path operations
 import pandas as pd
 import numpy as np
 import os
@@ -12,14 +17,16 @@ def refine_labels_by_distance():
     Generates precise motion labels based on the change in the 'distance' feature.
     """
     # --- File Paths ---
-    feature_dataset_path = 'data/processed/features.csv'
-    output_filepath = 'data/processed/final_labeled_data.csv'
+    feature_dataset_path = 'data/processed/features.csv'  # Input feature dataset
+    output_filepath = 'data/processed/final_labeled_data.csv'  # Output file for labeled data
     
+    # Check if the feature dataset exists
     if not os.path.exists(feature_dataset_path):
         print(f"Error: The feature dataset '{feature_dataset_path}' was not found.")
         print("Please run 'python3 src/build_dataset.py' first to create it.")
         return
 
+    # Load the feature dataset into a DataFrame
     print(f"Loading feature dataset from '{feature_dataset_path}'...")
     df = pd.read_csv(feature_dataset_path)
     
@@ -35,41 +42,47 @@ def refine_labels_by_distance():
     # Group by the session ID to process each experiment independently
     for session_name, group_df in df.groupby(session_id_col):
         # Calculate the difference in distance from the previous measurement
+        # .diff() computes the difference between each row and the previous row
         distance_diff = group_df['distance'].diff()
         
-        # Define the conditions for our new motion labels
+        # Define the conditions for our new motion labels:
+        # - If distance decreased: 'approaching'
+        # - If distance increased: 'receding'
+        # - If distance is the same: 'stationary'
         conditions = [
-            distance_diff < 0,  # If distance decreased -> approaching
-            distance_diff > 0,  # If distance increased -> receding
-            distance_diff == 0  # If distance is the same -> stationary
+            distance_diff < 0,  # Approaching
+            distance_diff > 0,  # Receding
+            distance_diff == 0  # Stationary
         ]
         
-        # Define the corresponding labels
+        # Define the corresponding labels for each condition
         choices = ['approaching', 'receding', 'stationary']
         
-        # Create the new 'motion' column.
-        # The first row of each group will have no difference, so we default it to 'stationary'.
+        # Create the new 'motion' column using np.select
+        # The first row of each group will have NaN for diff, so default to 'stationary'
         group_df['motion'] = np.select(conditions, choices, default='stationary')
         
+        # Add the processed group to the list
         processed_groups.append(group_df)
         
     # Combine all the processed groups back into a single dataframe
     final_df = pd.concat(processed_groups)
     
     # --- Prepare Final Dataset for Training ---
-    # We no longer need the original session label for training the model
-    final_df = final_df.drop(columns=[session_id_col])
+    # Rename the original session label to 'session_id' for clarity in sequence analysis (e.g., for TTC)
+    final_df = final_df.rename(columns={session_id_col: 'session_id'})
     
     # Rename the 'motion' column to 'label' so our training script can use it without changes
     final_df = final_df.rename(columns={'motion': 'label'})
     
-    # Check the balance of our new dataset
+    # Print the class distribution of the new labels for sanity check
     print("--- New Dataset Class Distribution ---")
     print(final_df['label'].value_counts())
     print("--------------------------------------")
     
     # --- Save the Final Dataset ---
     try:
+        # Save the final labeled dataset to CSV
         final_df.to_csv(output_filepath, index=False)
         print(f"Successfully created the final labeled dataset!")
         print(f"It has been saved to: '{output_filepath}'")
@@ -77,4 +90,5 @@ def refine_labels_by_distance():
         print(f"An error occurred while saving the final dataset: {e}")
 
 if __name__ == "__main__":
+    # Run the label refinement process when the script is executed directly
     refine_labels_by_distance()
