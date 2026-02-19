@@ -13,10 +13,5 @@ venv/
 *.swp
 .DS_Store
 
-# Data
-data/processed/
-reports/
-models/
-
 # Logs
 *.log
