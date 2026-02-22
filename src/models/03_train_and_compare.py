@@ -18,6 +18,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, classification_report  # For evaluation
+from sklearn.preprocessing import StandardScaler # For feature scaling
 import os  # For file operations
 import warnings  # To suppress warnings
 import joblib  # For saving models
@@ -42,8 +43,7 @@ def train_and_compare():
     print(f"Loading feature dataset from '{feature_dataset_path}'...")
     df = pd.read_csv(feature_dataset_path)
 
-    # Drop rows where the label is 'stationary' (not useful for classification)
-    df = df[df['label'] != 'stationary']
+    # Note: We now KEEP the 'stationary' class to make the model more robust.
     
     # Check if there is enough data to train
     if df.shape[0] < 10:
@@ -51,15 +51,20 @@ def train_and_compare():
         return
 
     # --- Prepare Data for Modeling ---
-    # Drop columns not used for training (labels, session_id, timestamp)
-    cols_to_drop = ['label']
-    if 'session_id' in df.columns:
-        cols_to_drop.append('session_id')
-    if 'timestamp' in df.columns:
-        cols_to_drop.append('timestamp')
+    # CRITICAL FIX: To avoid label leakage, we MUST remove 'velocity' and 'acceleration'
+    # as they were derived from the same distance change used to create the labels.
+    # We also remove other non-feature columns.
+    cols_to_drop = ['label', 'session_id', 'timestamp', 'velocity', 'acceleration']
+    
+    # Optional: You might also want to remove 'distance' if you want the model 
+    # to rely ONLY on the Doppler shift (FFT features). 
+    # For now, we'll keep distance as it can help distinguish distance-based signal attenuation.
+    # cols_to_drop.append('distance') 
         
-    X = df.drop(cols_to_drop, axis=1)  # Features
+    X = df.drop(cols_to_drop, axis=1, errors='ignore')  # Features
     y = df['label']                    # Target labels
+    
+    print(f"Training on features: {list(X.columns)}")
     
     # --- Split Data into Training and Testing Sets ---
     # Use stratified split to preserve class distribution
@@ -67,12 +72,23 @@ def train_and_compare():
         X, y, test_size=0.2, random_state=42, stratify=y
     )
     
+    # --- Feature Scaling ---
+    # CRITICAL: Scale features for models like SVM, KNN, and Logistic Regression
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    # Save the scaler! Prediction scripts need it.
+    scaler_path = 'models/motion_scaler.joblib'
+    joblib.dump(scaler, scaler_path)
+    print(f"Saved feature scaler to '{scaler_path}'")
+
     # --- Define Classifiers ---
     # Dictionary of classifiers to compare
     classifiers = {
         "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42),
-        "Logistic Regression": LogisticRegression(random_state=42),
-        "Support Vector Machine": SVC(random_state=42),
+        "Logistic Regression": LogisticRegression(random_state=42, max_iter=1000),
+        "Support Vector Machine": SVC(random_state=42, probability=True),
         "K-Nearest Neighbors": KNeighborsClassifier(),
         "Gradient Boosting": GradientBoostingClassifier(random_state=42)
     }
@@ -85,21 +101,20 @@ def train_and_compare():
     # --- Train and Evaluate Each Classifier ---
     for name, clf in classifiers.items():
         print(f"--- Training {name} ---")
-        clf.fit(X_train, y_train)
-        y_pred = clf.predict(X_test)
+        # Use scaled data for training
+        clf.fit(X_train_scaled, y_train)
+        y_pred = clf.predict(X_test_scaled)
         
         accuracy = accuracy_score(y_test, y_pred)
         report = classification_report(y_test, y_pred, output_dict=True)
         
-        results[name] = {
-            "Accuracy": accuracy,
-            "Precision (approaching)": report['approaching']['precision'],
-            "Recall (approaching)": report['approaching']['recall'],
-            "F1-Score (approaching)": report['approaching']['f1-score'],
-            "Precision (receding)": report['receding']['precision'],
-            "Recall (receding)": report['receding']['recall'],
-            "F1-Score (receding)": report['receding']['f1-score'],
-        }
+        # Collect basic metrics for comparison table
+        metrics = {"Accuracy": accuracy}
+        for label in ['approaching', 'receding', 'stationary']:
+            if label in report:
+                metrics[f"F1-{label}"] = report[label]['f1-score']
+        
+        results[name] = metrics
         
         if accuracy > best_accuracy:
             best_accuracy = accuracy
@@ -113,6 +128,7 @@ def train_and_compare():
 
     # --- Save Summary Table ---
     results_df = pd.DataFrame.from_dict(results, orient='index')
+    results_df.index.name = 'Classifier Model' # Add name to the first column
     print("--- Classifier Performance Comparison ---")
     print(results_df)
     

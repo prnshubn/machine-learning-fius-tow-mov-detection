@@ -39,20 +39,23 @@ def refine_labels_by_distance():
     # List to hold the processed dataframes for each session
     processed_groups = []
     
+    # Define a noise threshold (in meters/units) for stationary detection
+    # If the distance change is less than this, we consider the object stationary.
+    DISTANCE_THRESHOLD = 0.002 
+    
     # Group by the session ID to process each experiment independently
     for session_name, group_df in df.groupby(session_id_col):
         # Calculate the difference in distance from the previous measurement
-        # .diff() computes the difference between each row and the previous row
         distance_diff = group_df['distance'].diff()
         
         # Define the conditions for our new motion labels:
-        # - If distance decreased: 'approaching'
-        # - If distance increased: 'receding'
-        # - If distance is the same: 'stationary'
+        # - If distance decreased more than threshold: 'approaching'
+        # - If distance increased more than threshold: 'receding'
+        # - Otherwise: 'stationary'
         conditions = [
-            distance_diff < 0,  # Approaching
-            distance_diff > 0,  # Receding
-            distance_diff == 0  # Stationary
+            distance_diff < -DISTANCE_THRESHOLD,  # Approaching (negative change)
+            distance_diff > DISTANCE_THRESHOLD,   # Receding (positive change)
+            (distance_diff >= -DISTANCE_THRESHOLD) & (distance_diff <= DISTANCE_THRESHOLD) # Stationary
         ]
         
         # Define the corresponding labels for each condition

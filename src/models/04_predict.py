@@ -1,5 +1,3 @@
-estimates Time-To-Collision (TTC), and generates a safety protocol.
-
 """
 This script uses the trained model to make a prediction on a new, single data sample.
 It reads a small sequence of data to calculate kinematics, predicts motion, 
@@ -29,17 +27,14 @@ from src.data.processing import perform_fft, extract_spectral_features, find_fir
 from src.models.llm_safety_module import generate_safety_protocol, print_safety_report
 
 
-def predict_motion(data_row, model):
+def predict_motion(feature_df, model, scaler):
     """
-    Predicts motion from a single row of sensor data features using the trained classifier.
-    Args:
-        data_row (pd.DataFrame): Feature row for prediction
-        model: Trained classifier
-    Returns:
-        str: Predicted label or error message
+    Predicts motion from features using the trained classifier and scaler.
     """
     try:
-        prediction = model.predict(data_row)
+        # Scale the features (MUST match training features)
+        X_scaled = scaler.transform(feature_df)
+        prediction = model.predict(X_scaled)
         return prediction[0]
     except Exception as e:
         return f"Prediction error: {e}"
@@ -48,25 +43,16 @@ def predict_motion(data_row, model):
 def predict_ttc(features, model, scaler):
     """
     Predicts Time-To-Collision (TTC) using the trained regression model and scaler.
-    Args:
-        features (pd.DataFrame): Feature row(s) for prediction
-        model: Trained regression model
-        scaler: Fitted scaler for feature normalization
-    Returns:
-        float or None: Predicted TTC value or None if error
     """
     try:
-        # Select features expected by the model (order must match training)
+        # TTC model uses specific features (including velocity/acceleration)
         feature_cols = [
             'distance', 'velocity', 'acceleration', 
             'Peak Frequency', 'Mean Frequency', 'Spectral Centroid', 
             'Spectral Skewness', 'Spectral Kurtosis', 'first_peak_index'
         ]
-        # Ensure features is a DataFrame with these columns
         X = features[feature_cols]
-        # Scale features
         X_scaled = scaler.transform(X)
-        # Predict TTC
         ttc = model.predict(X_scaled)
         return ttc[0]
     except Exception as e:
@@ -76,13 +62,6 @@ def predict_ttc(features, model, scaler):
 def main():
     """
     Main function to load models and data, then make predictions and safety reports.
-    Steps:
-    1. Parse command-line arguments for input file
-    2. Load trained models and scaler
-    3. Load and preprocess input data
-    4. Extract features
-    5. Predict motion and TTC
-    6. Generate and print safety protocol
     """
     # --- Argument Parsing ---
     parser = argparse.ArgumentParser(description='Predict motion and TTC from a sensor data file.')
@@ -91,15 +70,17 @@ def main():
 
     # --- Load Models ---
     motion_model_path = 'models/motion_detection_model.joblib'
+    motion_scaler_path = 'models/motion_scaler.joblib'
     ttc_model_path = 'models/ttc_model.joblib'
     ttc_scaler_path = 'models/ttc_scaler.joblib'
     
-    if not os.path.exists(motion_model_path):
-        print(f"Error: Motion model '{motion_model_path}' not found.")
+    if not os.path.exists(motion_model_path) or not os.path.exists(motion_scaler_path):
+        print(f"Error: Motion model or scaler not found.")
         return
 
-    print(f"Loading motion model from '{motion_model_path}'...")
+    print(f"Loading motion model and scaler...")
     motion_model = joblib.load(motion_model_path)
+    motion_scaler = joblib.load(motion_scaler_path)
     
     ttc_model = None
     ttc_scaler = None
@@ -115,34 +96,28 @@ def main():
         print(f"Error: The data file '{args.filepath}' was not found.")
         return
         
-    # Read 5 rows to calculate kinematics
+    # Read a few rows to calculate kinematics
     N_ROWS = 5
-    print(f"Loading last {N_ROWS} data points from '{args.filepath}' for context...")
+    print(f"Loading data from '{args.filepath}' for context...")
     try:
-        # Read the file
         df = pd.read_csv(args.filepath, header=None)
-        if len(df) > N_ROWS:
-            sample_df = df.iloc[:N_ROWS].copy() # Take first 5 for demo
-        else:
-            sample_df = df.copy()
+        # We take the MIDDLE of the file or a specific segment for more interesting demo
+        # but for simplicity, let's take a segment where we know there is movement
+        start_idx = min(len(df) // 2, len(df) - N_ROWS)
+        sample_df = df.iloc[start_idx : start_idx + N_ROWS].copy()
             
     except Exception as e:
         print(f"An error occurred while reading the data file: {e}")
         return
 
     # --- Process Data ---
-    # Extract distances and timestamps
     distances = sample_df.iloc[:, 10]
     timestamps = sample_df.iloc[:, 16]
-    
-    # Calculate Kinematics
     velocity, acceleration = calculate_kinematics(distances, timestamps)
     
-    # We use the LAST row for prediction
     last_idx = len(sample_df) - 1
     last_row = sample_df.iloc[[last_idx]]
     
-    # Perform FFT
     SAMPLING_RATE = 1953125
     frequencies, magnitudes = perform_fft(last_row, SAMPLING_RATE)
     features = extract_spectral_features(frequencies, magnitudes)
@@ -159,11 +134,16 @@ def main():
     adc_data = last_row.iloc[0, ADC_DATA_START_INDEX:].values.flatten()
     features['first_peak_index'] = find_first_peak_index(adc_data)
     
-    # Prepare Feature DataFrame
-    feature_df = pd.DataFrame([features])
+    # Prepare Feature DataFrame for Motion (MUST match training columns)
+    motion_feature_cols = [
+        'Peak Frequency', 'Mean Frequency', 'Spectral Centroid', 
+        'Spectral Skewness', 'Spectral Kurtosis', 'distance', 'first_peak_index'
+    ]
+    # Ensure all columns exist
+    feature_df_motion = pd.DataFrame([features])[motion_feature_cols]
     
     # --- Predict Motion ---
-    predicted_motion = predict_motion(feature_df, motion_model)
+    predicted_motion = predict_motion(feature_df_motion, motion_model, motion_scaler)
     
     print(f"""
 --- Motion Prediction ---
@@ -172,8 +152,10 @@ Prediction: {str(predicted_motion).upper()}
 """)
 
     # --- Predict TTC & Safety ---
+    feature_df_full = pd.DataFrame([features])
+    
     if predicted_motion == 'approaching' and ttc_model is not None:
-        ttc = predict_ttc(feature_df, ttc_model, ttc_scaler)
+        ttc = predict_ttc(feature_df_full, ttc_model, ttc_scaler)
         
         if ttc is not None:
             # Generate Safety Report
@@ -186,7 +168,7 @@ Prediction: {str(predicted_motion).upper()}
     elif predicted_motion == 'approaching' and ttc_model is None:
         print("Note: Approaching detected, but TTC model is not available.")
     else:
-        print("Object is not approaching. No safety protocol required.")
+        print(f"Object state: {str(predicted_motion).upper()}. No safety protocol required.")
 
 if __name__ == "__main__":
     main()

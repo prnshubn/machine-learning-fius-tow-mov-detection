@@ -32,15 +32,24 @@ By analyzing the frequency spectrum, we can extract features that capture the in
 ## The Data: From Raw Signals to Labeled Features
 
 ### Raw Sensor Data (`data/raw/`)
-The raw data is stored in CSV files in the `data/raw/` directory. Each file represents a continuous recording session. Based on the processing scripts, we can infer the structure of each row in these files:
--   **Columns 0-9:** Metadata about the measurement (e.g., timestamps, sensor configuration).
--   **Column 10:** The distance to the object, as calculated by the sensor's internal processing.
--   **Columns 11-16:** Additional metadata.
--   **Columns 17 onwards:** The raw, digitized amplitude readings from the sensor's Analog-to-Digital Converter (ADC), representing the reflected sound wave (the echo).
+The pipeline is designed to be fully dynamic. To add new data to the project, simply place your CSV files in the `data/raw/` directory.
+
+#### ⚠️ Strict Naming Convention
+All raw data files **MUST** follow this naming convention to be processed:
+`signal_{distance}_{object_name}.csv`
+
+*   **`signal`**: Constant prefix.
+*   **`distance`**: The distance at which the recording started (or a unique identifier).
+*   **`object_name`**: The name of the object being sensed (e.g., `metal_plate`, `person`, `wall`). This will automatically become the class label in the dataset.
+
+**Example correct filenames:**
+- `signal_1500_metal_plate.csv`
+- `signal_2000_cardboard.csv`
+- `signal_500_human_subject.csv`
 
 ### Processed Data
--   `data/processed/features.csv`: This file stores the features extracted from the raw data. Each row corresponds to a single measurement and contains the extracted spectral features, the distance, and the original file label.
--   `data/processed/final_labeled_data.csv`: This is the final dataset used for training. It's the same as `features.csv` but with the motion labels ('approaching', 'receding', 'stationary') added.
+-   `data/processed/features.csv`: This file stores the features extracted from all raw files.
+-   `data/processed/final_labeled_data.csv`: The final dataset used for training, including refined motion labels.
 
 ## The Data Science Pipeline: From Raw Signal to Prediction
 
