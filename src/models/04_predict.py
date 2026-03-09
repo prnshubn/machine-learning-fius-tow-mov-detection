@@ -1,17 +1,9 @@
 """
-This script uses the trained model to make a prediction on a new, single data sample.
-It reads a small sequence of data to calculate kinematics, predicts motion, 
-estimates Time-To-Collision (TTC), and generates a safety protocol.
-
-Main functionalities:
-- Load a new sensor data file
-- Extract features (spectral, kinematic, etc.)
-- Use trained classifier to predict motion
-- Use trained regression model to predict TTC
-- Generate a safety protocol using LLM logic
+This script simulates real-time deployment by streaming through a raw data file.
+It detects distinct "Encounters" (every time you approached the sensor) 
+and generates a full safety incident report (saved to reports/).
 """
 
-# Import required libraries
 import os
 import sys
 import pandas as pd
@@ -19,156 +11,123 @@ import joblib
 import argparse
 import numpy as np
 
-# Add the project root to the Python path for absolute imports
+# Add the project root to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-# Import feature extraction and safety protocol utilities
 from src.data.processing import perform_fft, extract_spectral_features, find_first_peak_index, calculate_kinematics, ADC_DATA_START_INDEX
-from src.models.llm_safety_module import generate_safety_protocol, print_safety_report
-
-
-def predict_motion(feature_df, model, scaler):
-    """
-    Predicts motion from features using the trained classifier and scaler.
-    """
-    try:
-        # Scale the features (MUST match training features)
-        X_scaled = scaler.transform(feature_df)
-        prediction = model.predict(X_scaled)
-        return prediction[0]
-    except Exception as e:
-        return f"Prediction error: {e}"
-
-
-def predict_ttc(features, model, scaler):
-    """
-    Predicts Time-To-Collision (TTC) using the trained regression model and scaler.
-    """
-    try:
-        # TTC model uses specific features (including velocity/acceleration)
-        feature_cols = [
-            'distance', 'velocity', 'acceleration', 
-            'Peak Frequency', 'Mean Frequency', 'Spectral Centroid', 
-            'Spectral Skewness', 'Spectral Kurtosis', 'first_peak_index'
-        ]
-        X = features[feature_cols]
-        X_scaled = scaler.transform(X)
-        ttc = model.predict(X_scaled)
-        return ttc[0]
-    except Exception as e:
-        print(f"TTC Prediction error: {e}")
-        return None
+from src.models.llm_safety_module import generate_safety_protocol
 
 def main():
-    """
-    Main function to load models and data, then make predictions and safety reports.
-    """
-    # --- Argument Parsing ---
-    parser = argparse.ArgumentParser(description='Predict motion and TTC from a sensor data file.')
-    parser.add_argument('filepath', type=str, help='The path to the raw CSV data file.')
+    parser = argparse.ArgumentParser(description='Simulate real-time tracking on a sensor data file.')
+    parser.add_argument('filepath', type=str, help='Path to the raw CSV data file.')
     args = parser.parse_args()
 
     # --- Load Models ---
-    motion_model_path = 'models/motion_detection_model.joblib'
-    motion_scaler_path = 'models/motion_scaler.joblib'
-    ttc_model_path = 'models/ttc_model.joblib'
-    ttc_scaler_path = 'models/ttc_scaler.joblib'
-    
-    if not os.path.exists(motion_model_path) or not os.path.exists(motion_scaler_path):
-        print(f"Error: Motion model or scaler not found.")
-        return
-
-    print(f"Loading motion model and scaler...")
-    motion_model = joblib.load(motion_model_path)
-    motion_scaler = joblib.load(motion_scaler_path)
-    
-    ttc_model = None
-    ttc_scaler = None
-    if os.path.exists(ttc_model_path) and os.path.exists(ttc_scaler_path):
-        print(f"Loading TTC model and scaler...")
-        ttc_model = joblib.load(ttc_model_path)
-        ttc_scaler = joblib.load(ttc_scaler_path)
-    else:
-        print("Warning: TTC model or scaler not found. TTC prediction will be skipped.")
-
-    # --- Load Data Sample (Sequence) ---
-    if not os.path.exists(args.filepath):
-        print(f"Error: The data file '{args.filepath}' was not found.")
-        return
-        
-    # Read a few rows to calculate kinematics
-    N_ROWS = 5
-    print(f"Loading data from '{args.filepath}' for context...")
     try:
-        df = pd.read_csv(args.filepath, header=None)
-        # We take the MIDDLE of the file or a specific segment for more interesting demo
-        # but for simplicity, let's take a segment where we know there is movement
-        start_idx = min(len(df) // 2, len(df) - N_ROWS)
-        sample_df = df.iloc[start_idx : start_idx + N_ROWS].copy()
-            
+        motion_model = joblib.load('models/motion_detection_model.joblib')
+        motion_scaler = joblib.load('models/motion_scaler.joblib')
+        ttc_model = joblib.load('models/ttc_model.joblib')
+        ttc_scaler = joblib.load('models/ttc_scaler.joblib')
     except Exception as e:
-        print(f"An error occurred while reading the data file: {e}")
-        return
+        print(f"Error loading models: {e}.")
+        sys.exit(1)
 
-    # --- Process Data ---
-    distances = sample_df.iloc[:, 10]
-    timestamps = sample_df.iloc[:, 16]
-    velocity, acceleration = calculate_kinematics(distances, timestamps)
-    
-    last_idx = len(sample_df) - 1
-    last_row = sample_df.iloc[[last_idx]]
-    
-    SAMPLING_RATE = 1953125
-    frequencies, magnitudes = perform_fft(last_row, SAMPLING_RATE)
-    features = extract_spectral_features(frequencies, magnitudes)
-    
-    if features is None:
-        print("Error: Could not extract spectral features.")
-        return
-        
-    # Add other features
-    features['distance'] = distances.iloc[last_idx]
-    features['velocity'] = velocity.iloc[last_idx]
-    features['acceleration'] = acceleration.iloc[last_idx]
-    
-    adc_data = last_row.iloc[0, ADC_DATA_START_INDEX:].values.flatten()
-    features['first_peak_index'] = find_first_peak_index(adc_data)
-    
-    # Prepare Feature DataFrame for Motion (MUST match training columns)
-    motion_feature_cols = [
-        'Peak Frequency', 'Mean Frequency', 'Spectral Centroid', 
-        'Spectral Skewness', 'Spectral Kurtosis', 'distance', 'first_peak_index'
-    ]
-    # Ensure all columns exist
-    feature_df_motion = pd.DataFrame([features])[motion_feature_cols]
-    
-    # --- Predict Motion ---
-    predicted_motion = predict_motion(feature_df_motion, motion_model, motion_scaler)
-    
-    print(f"""
---- Motion Prediction ---
-Prediction: {str(predicted_motion).upper()}
--------------------------
-""")
+    input_filename = os.path.basename(args.filepath)
+    print(f"\n{'='*60}")
+    print(f" SESSION SAFETY ANALYSIS: {input_filename} ".center(60, '='))
+    print(f"{'='*60}\n")
 
-    # --- Predict TTC & Safety ---
-    feature_df_full = pd.DataFrame([features])
+    # --- Load Data Meta ---
+    df_meta = pd.read_csv(args.filepath, header=None, usecols=[10, 16])
+    df_meta.columns = ['distance', 'timestamp']
+    velocity, acceleration = calculate_kinematics(df_meta['distance'], df_meta['timestamp'])
     
-    if predicted_motion == 'approaching' and ttc_model is not None:
-        ttc = predict_ttc(feature_df_full, ttc_model, ttc_scaler)
-        
-        if ttc is not None:
-            # Generate Safety Report
-            report = generate_safety_protocol(
-                ttc=ttc, 
-                velocity=features['velocity'], 
-                acceleration=features['acceleration']
-            )
-            print_safety_report(report)
-    elif predicted_motion == 'approaching' and ttc_model is None:
-        print("Note: Approaching detected, but TTC model is not available.")
+    encounters = []
+    current_encounter = []
+    
+    # Heuristic: If we don't see movement for 20 frames, the encounter has ended
+    GAP_THRESHOLD = 20 
+    gap_counter = 0
+
+    print("Streaming data and analyzing motion patterns...")
+
+    for i in range(5, len(df_meta)):
+        # Lowered threshold from -0.15 to -0.01 based on actual data distribution
+        if velocity[i] < -0.01: 
+            gap_counter = 0
+            
+            # Deep Feature Extraction
+            row_data = pd.read_csv(args.filepath, header=None, skiprows=i, nrows=1)
+            freqs, mags = perform_fft(row_data, 1953125)
+            features = extract_spectral_features(freqs, mags)
+            
+            if features:
+                features['distance'] = df_meta.loc[i, 'distance']
+                features['velocity'] = velocity[i]
+                features['acceleration'] = acceleration[i]
+                features['first_peak_index'] = find_first_peak_index(row_data.iloc[0, ADC_DATA_START_INDEX:].values)
+                
+                # Motion Verification
+                feat_cols = ['Peak Frequency', 'Mean Frequency', 'Spectral Centroid', 'Spectral Skewness', 'Spectral Kurtosis', 'distance', 'first_peak_index']
+                X_motion = motion_scaler.transform(pd.DataFrame([features])[feat_cols])
+                if motion_model.predict(X_motion)[0] == 'approaching':
+                    
+                    # TTC Calculation
+                    X_ttc = ttc_scaler.transform(pd.DataFrame([features])[['distance', 'velocity', 'acceleration', 'Peak Frequency', 'Mean Frequency', 'Spectral Centroid', 'Spectral Skewness', 'Spectral Kurtosis', 'first_peak_index']])
+                    ttc = ttc_model.predict(X_ttc)[0]
+                    
+                    current_encounter.append({
+                        'dist': features['distance'],
+                        'vel': features['velocity'],
+                        'ttc': ttc
+                    })
+        else:
+            gap_counter += 1
+            if gap_counter >= GAP_THRESHOLD and current_encounter:
+                best_ttc = min(e['ttc'] for e in current_encounter)
+                max_vel = min(e['vel'] for e in current_encounter)
+                encounters.append({
+                    'Encounter_ID': len(encounters) + 1,
+                    'Peak_Speed': abs(max_vel),
+                    'Min_TTC': best_ttc,
+                    'Risk_Level': "CRITICAL" if best_ttc < 1.0 else "HIGH" if best_ttc < 3.0 else "MEDIUM"
+                })
+                current_encounter = []
+
+    # Final wrap up
+    if current_encounter:
+        best_ttc = min(e['ttc'] for e in current_encounter)
+        encounters.append({
+            'Encounter_ID': len(encounters) + 1,
+            'Peak_Speed': abs(min(e['vel'] for e in current_encounter)),
+            'Min_TTC': best_ttc,
+            'Risk_Level': "CRITICAL" if best_ttc < 1.0 else "HIGH" if best_ttc < 3.0 else "MEDIUM"
+        })
+
+    # --- FINAL REPORT ---
+    if not encounters:
+        print("\nResult: No safety incidents detected. User remained at a safe distance.")
     else:
-        print(f"Object state: {str(predicted_motion).upper()}. No safety protocol required.")
+        # Create DataFrame for the report
+        report_df = pd.DataFrame(encounters)
+        
+        # Save to CSV
+        output_path = f"reports/safety_log_{input_filename}"
+        os.makedirs('reports', exist_ok=True)
+        report_df.to_csv(output_path, index=False)
+        
+        print(f"\nDETECTION SUMMARY (Saved to: {output_path})")
+        print(f"{'-'*60}")
+        print(report_df.to_string(index=False))
+        print(f"{'-'*60}")
+        print(f"\nTotal Encounters Neutralized: {len(encounters)}")
+        
+        # Detailed protocol for worst case
+        worst = report_df.loc[report_df['Min_TTC'].idxmin()]
+        print(f"\n--- Protocol for Most Critical Encounter (TTC: {worst['Min_TTC']:.2f}s) ---")
+        report = generate_safety_protocol(worst['Min_TTC'], -worst['Peak_Speed'], 0)
+        print(f"ACTION REQUIRED: {report['recommended_protocol']}")
+        print(f"ASSESSMENT: {report['assessment']}")
 
 if __name__ == "__main__":
     main()

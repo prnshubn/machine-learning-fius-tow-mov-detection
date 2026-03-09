@@ -8,9 +8,7 @@ and assigns a 'approaching', 'receding', or 'stationary' label to each row.
 import pandas as pd  # For data manipulation
 import numpy as np   # For numerical operations
 import os           # For file path operations
-import pandas as pd
-import numpy as np
-import os
+import sys
 
 def refine_labels_by_distance():
     """
@@ -23,8 +21,20 @@ def refine_labels_by_distance():
     # Check if the feature dataset exists
     if not os.path.exists(feature_dataset_path):
         print(f"Error: The feature dataset '{feature_dataset_path}' was not found.")
-        print("Please run 'python3 src/build_dataset.py' first to create it.")
-        return
+        print("Please run 'python3 src/data/01_build_features.py' first to create it.")
+        sys.exit(1)
+
+    # --- Fast Efficiency Check: Modification Time ---
+    if os.path.exists(output_filepath):
+        # If output is newer than input, skip
+        input_mtime = os.path.getmtime(feature_dataset_path)
+        output_mtime = os.path.getmtime(output_filepath)
+        
+        if output_mtime > input_mtime:
+            print(f"Step 2: '{output_filepath}' is up to date (Fast mtime check). Skipping.")
+            return
+        else:
+            print(f"Step 2: Input features have changed. Refining labels...")
 
     # Load the feature dataset into a DataFrame
     print(f"Loading feature dataset from '{feature_dataset_path}'...")
@@ -40,7 +50,6 @@ def refine_labels_by_distance():
     processed_groups = []
     
     # Define a noise threshold (in meters/units) for stationary detection
-    # If the distance change is less than this, we consider the object stationary.
     DISTANCE_THRESHOLD = 0.002 
     
     # Group by the session ID to process each experiment independently
@@ -48,10 +57,7 @@ def refine_labels_by_distance():
         # Calculate the difference in distance from the previous measurement
         distance_diff = group_df['distance'].diff()
         
-        # Define the conditions for our new motion labels:
-        # - If distance decreased more than threshold: 'approaching'
-        # - If distance increased more than threshold: 'receding'
-        # - Otherwise: 'stationary'
+        # Define the conditions for our new motion labels
         conditions = [
             distance_diff < -DISTANCE_THRESHOLD,  # Approaching (negative change)
             distance_diff > DISTANCE_THRESHOLD,   # Receding (positive change)
@@ -62,7 +68,6 @@ def refine_labels_by_distance():
         choices = ['approaching', 'receding', 'stationary']
         
         # Create the new 'motion' column using np.select
-        # The first row of each group will have NaN for diff, so default to 'stationary'
         group_df['motion'] = np.select(conditions, choices, default='stationary')
         
         # Add the processed group to the list
@@ -72,25 +77,23 @@ def refine_labels_by_distance():
     final_df = pd.concat(processed_groups)
     
     # --- Prepare Final Dataset for Training ---
-    # Rename the original session label to 'session_id' for clarity in sequence analysis (e.g., for TTC)
+    # Rename for clarity
     final_df = final_df.rename(columns={session_id_col: 'session_id'})
-    
-    # Rename the 'motion' column to 'label' so our training script can use it without changes
     final_df = final_df.rename(columns={'motion': 'label'})
     
-    # Print the class distribution of the new labels for sanity check
+    # Print the class distribution
     print("--- New Dataset Class Distribution ---")
     print(final_df['label'].value_counts())
     print("--------------------------------------")
     
     # --- Save the Final Dataset ---
     try:
-        # Save the final labeled dataset to CSV
         final_df.to_csv(output_filepath, index=False)
         print(f"Successfully created the final labeled dataset!")
         print(f"It has been saved to: '{output_filepath}'")
     except Exception as e:
         print(f"An error occurred while saving the final dataset: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     # Run the label refinement process when the script is executed directly

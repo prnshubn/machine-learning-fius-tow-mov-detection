@@ -20,6 +20,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, classification_report  # For evaluation
 from sklearn.preprocessing import StandardScaler # For feature scaling
 import os  # For file operations
+import sys
 import warnings  # To suppress warnings
 import joblib  # For saving models
 
@@ -37,7 +38,7 @@ def train_and_compare():
     if not os.path.exists(feature_dataset_path):
         print(f"Error: The feature dataset '{feature_dataset_path}' was not found.")
         print("Please run 'python3 src/data/02_refine_labels.py' first to create it.")
-        return
+        sys.exit(1)
 
     # Load the labeled feature dataset
     print(f"Loading feature dataset from '{feature_dataset_path}'...")
@@ -48,7 +49,7 @@ def train_and_compare():
     # Check if there is enough data to train
     if df.shape[0] < 10:
         print("Not enough data to train the models. Aborting.")
-        return
+        sys.exit(1)
 
     # --- Prepare Data for Modeling ---
     # CRITICAL FIX: To avoid label leakage, we MUST remove 'velocity' and 'acceleration'

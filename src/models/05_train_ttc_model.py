@@ -22,6 +22,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score  #
 from sklearn.preprocessing import StandardScaler  # For feature scaling
 import joblib  # For saving models
 import os  # For file operations
+import sys
 import warnings  # To suppress warnings
 
 # Suppress warnings for cleaner output
@@ -45,7 +46,7 @@ def train_ttc_model():
     # Check if the data file exists
     if not os.path.exists(data_path):
         print(f"Error: Data file '{data_path}' not found.")
-        return
+        sys.exit(1)
 
     # Load the labeled data
     print(f"Loading data from '{data_path}'...")
@@ -58,7 +59,7 @@ def train_ttc_model():
     # Check if there is any approaching data
     if approaching_df.empty:
         print("Error: No 'approaching' data found to train TTC model.")
-        return
+        sys.exit(1)
 
     # --- Calculate Ground Truth TTC ---
     # Identify continuous approaching sequences to define the "impact" time (T=0)

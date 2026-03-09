@@ -91,7 +91,7 @@ echo "--- Prediction made successfully ---"
 # --- 5. Generate Visualizations ---
 echo "--- Step 5: Generating visualizations ---"
 python3 src/visualization/plot_label_distribution.py
-python3 src/visualization/plot_feature_distribution.py
+python3 src/visualization/plot_feature_importance.py
 python3 src/visualization/plot_distance_over_time.py data/raw/signal_1500_metal_plate.csv
 python3 src/visualization/plot_classifier_comparison.py
 echo "--- Visualizations generated successfully ---"
