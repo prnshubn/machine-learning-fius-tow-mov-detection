@@ -15,7 +15,7 @@ def plot_label_distribution():
     
     if not os.path.exists(data_path):
         print(f"Error: The dataset '{data_path}' was not found.")
-        print("Please run 'python3 src/data/02_refine_labels.py' first to create it.")
+        print("Please run 'python3 src/data/label_generator.py' first to create it.")
         return
 
     print(f"Loading data from '{data_path}'...")

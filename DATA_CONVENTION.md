@@ -31,4 +31,4 @@ To ensure the automated pipeline can process your sensor data and correctly labe
 ---
 
 ## Why is this strictly enforced?
-The script `src/data/01_build_features.py` automatically scans the `data/raw/` folder. It uses the `object_name` part of the filename to automatically create a column in your dataset. This allows you to add new data and retrain your models without ever touching the code.
+The script `src/data/feature_extractor.py` automatically scans the `data/raw/` folder. It uses the `object_name` part of the filename to automatically create a column in your dataset. This allows you to add new data and retrain your models without ever touching the code.

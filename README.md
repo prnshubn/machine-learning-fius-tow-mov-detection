@@ -1,137 +1,66 @@
-# Ultrasonic Motion Detection using Machine Learning
+# Acoustic Shield: Proactive Safety via Raw Ultrasonic Signal Analysis
 
-This project provides a comprehensive pipeline to determine the direction of an object's motion relative to an ultrasonic sensor. By analyzing the raw signal data from the sensor, we use machine learning to classify the object's movement as 'approaching', 'receding', or 'stationary'.
+## 🌟 Project Vision: From Sensing to Safety
+Standard ultrasonic sensors are typically used for simple distance measurement. This project transforms that passive data into a **proactive safety system**. By bypassing pre-calculated distance metrics and analyzing **Raw ADC (Analog-to-Digital Converter) Reflections**, we identify complex movement patterns and predict Time-to-Collision (TTC) with high precision.
 
-## Core Concepts: The Physics and the Math
+---
 
-### Ultrasonic Sensing
-An ultrasonic sensor measures distance by emitting a high-frequency sound pulse (a "chirp") and timing how long it takes for the echo to return. The sensor used in this project emits a 40 kHz pulse, which is above the range of human hearing. The time-of-flight of the echo is directly proportional to the distance of the object.
+## 🚀 Key Technical Innovations
 
-### The Doppler Effect: The Key to Detecting Motion
-The Doppler effect is a fundamental principle in physics that describes the change in frequency of a wave in relation to an observer who is moving relative to the wave source. A common example is the change in pitch of a siren as it moves towards or away from you.
+### 1. Pure Sensor Data (Beyond the Distance Column)
+Traditional systems rely on a single distance value. Our pipeline implements **Robust First-Peak Detection**. We scan the raw ADC buffer to find the exact sample index where the first ultrasonic "Echo" occurs. This allows the model to learn the raw physical characteristics of the reflection rather than relying on a black-box distance calculation.
 
--   **Towards:** As a sound source moves towards you, the sound waves are compressed, leading to a higher frequency (higher pitch).
--   **Away:** As it moves away, the waves are stretched, resulting in a lower frequency (lower pitch).
+### 2. Quad-Scale Temporal Context (Dynamic Movement Recognition)
+A single radar line is just a snapshot. Movement is a story told over time. We implement **Quad-Scale Windowing**:
+*   **Micro Window (5 frames):** Reactive to high-speed bursts and immediate starts.
+*   **Standard Window (10-25 frames):** Captures the core physical trend of a human approach.
+*   **Macro Window (50 frames):** Identifies slow, steady creeps and filters out long-term environmental drift.
+By calculating trends (deltas) and rolling averages across all four scales, the model can distinguish between a sensor glitch and real physical intent across a dynamic range of speeds.
 
-This same principle applies to the ultrasonic sensor's echo. The sensor is stationary, but the object it's detecting is moving.
+### 3. Dual-Stage ML Architecture
+We employ a sophisticated two-stage pipeline:
+*   **Stage 1 (Classification):** Uses **One-Class Classification (OCC)** to determine if an object is "Towards" the sensor. We treat everything else (noise, stationary, receding) as an anomaly.
+*   **Stage 2 (Regression):** If Stage 1 detects a threat, the system triggers a **Support Vector Regressor (SVR)** to predict the exact moment of impact (TTC).
 
--   If an object is moving **towards** the sensor, the reflected sound waves are compressed, and the echo returns with a slightly **higher frequency** than the emitted 40 kHz.
--   If the object is moving **away** from the sensor, the waves are stretched, and the echo has a slightly **lower frequency**.
+---
 
-By detecting this frequency shift in the echo, we can determine the direction of the object's motion.
+## 🛠 Detailed Component Breakdown
 
-### From Time to Frequency: The Fast Fourier Transform (FFT)
-The raw sensor data is a time-domain signal, which is a series of amplitude values over time. The FFT is a mathematical algorithm that transforms this signal into the frequency domain, showing us which frequencies are present in the signal and at what intensity.
+### Step 1: Feature Extraction (`feature_extractor.py`)
+*   **Echo Indexing:** Uses a 4x standard deviation threshold to find the first significant peak in the raw signal.
+*   **Spectral Centroids:** Analyzes the frequency distribution of the reflection.
+*   **Trend Vectors:** Calculates the "Echo Trend" across short and long time scales.
 
-By analyzing the frequency spectrum, we can extract features that capture the information about the Doppler shift. The key features extracted in this project are:
--   **Peak Frequency:** The frequency with the highest magnitude in the spectrum. This is the most direct indicator of the Doppler shift.
--   **Mean Frequency:** The average frequency of the spectrum, weighted by the magnitude of each frequency.
--   **Spectral Centroid:** The "center of mass" of the spectrum. It's another measure of the central tendency of the spectral energy.
--   **Spectral Skewness and Kurtosis:** These are statistical measures that describe the shape of the spectrum. They can provide additional information about the nature of the reflected signal.
+### Step 2: Ground Truth Labeling (`label_generator.py`)
+*   Uses a **Kalman Filter** to derive hidden velocity from the noisy raw signal.
+*   Applies **High-Sensitivity Thresholding (0.05)** to capture the precise beginning and end of every approach burst.
+*   Trims leading/trailing "dead air" to balance the dataset for the training engine.
 
-## The Data: From Raw Signals to Labeled Features
+### Step 3: Model Training & Tuning (`model_trainer.py`)
+*   **Algorithm Sweep:** Automatically trains and compares **One-Class SVM**, **Isolation Forest**, **Local Outlier Factor (LOF)**, and **Autoencoders**.
+*   **Hyperparameter Tuning:** Iterates through different configurations (Narrow vs. Wide Autoencoders, varying SVM 'nu' values) to find the absolute peak F1-Score.
 
-### Raw Sensor Data (`data/raw/`)
-The pipeline is designed to be fully dynamic. To add new data to the project, simply place your CSV files in the `data/raw/` directory.
+### Step 3b: TTC Regression (`ttc_trainer.py`)
+*   Trains **Linear Regression** and **SVR** models specifically on approach sequences.
+*   Uses kinematics and echo trends to map signal patterns to a countdown in seconds before impact.
 
-#### ⚠️ Strict Naming Convention
-All raw data files **MUST** follow this naming convention to be processed:
-`signal_{distance}_{object_name}.csv`
+### Step 4: Real-time Simulation (`predictor.py`)
+*   Simulates a live deployment using a **Rolling Queue Buffer**.
+*   Implements the "Two-Stage" logic: Only calculates TTC if the OCC model verifies an approach is in progress.
 
-*   **`signal`**: Constant prefix.
-*   **`distance`**: The distance at which the recording started (or a unique identifier).
-*   **`object_name`**: The name of the object being sensed (e.g., `metal_plate`, `person`, `wall`). This will automatically become the class label in the dataset.
+---
 
-**Example correct filenames:**
-- `signal_1500_metal_plate.csv`
-- `signal_2000_cardboard.csv`
-- `signal_500_human_subject.csv`
+## 🏭 Industry Standards Followed
+1.  **Modular Pipeline:** Clear separation of concerns (Extraction -> Labeling -> Training -> Inference).
+2.  **Robust Logging:** Unified `processing.log` with real-time `tee` streaming for terminal visibility.
+3.  **Reproducibility:** `run_pipeline.sh` automates the entire environment setup and execution.
+4.  **Edge AI Optimization:** Prioritizes features that can be extracted directly from raw hardware buffers (ADC samples).
 
-### Processed Data
--   `data/processed/features.csv`: This file stores the features extracted from all raw files.
--   `data/processed/final_labeled_data.csv`: The final dataset used for training, including refined motion labels.
+---
 
-## The Data Science Pipeline: From Raw Signal to Prediction
-
-### Step 1: Feature Extraction (`src/data/01_build_features.py`)
--   **Goal:** To convert the raw, time-domain ADC signal into a set of numerical features that can be used by a machine learning model.
--   **Process:**
-    1.  The script reads each raw CSV file from the `data/raw/` directory.
-    2.  For each row (a single measurement), it isolates the ADC readings.
-    3.  It applies the **Fast Fourier Transform (FFT)** to the ADC data. The FFT is a crucial step that decomposes the time-based signal into its constituent frequencies. This allows us to see the frequency spectrum of the echo and look for the Doppler shift.
-    4.  From the spectrum, it extracts a set of spectral features.
--   **Output:** A single `features.csv` file containing the extracted features for all measurements.
-
-### Step 2: Label Generation (`src/data/02_refine_labels.py`)
--   **Goal:** To create the "ground truth" labels that our model will learn to predict.
--   **Process:**
-    1.  The script reads the `features.csv` file.
-    2.  It groups the data by the original source file, treating each as a separate session.
-    3.  Within each session, it calculates the difference in the `distance` column between each row and the one before it.
-    4.  Based on this difference, it assigns a motion label.
--   **Output:** The `final_labeled_data.csv` file, which is ready for model training.
-
-### Step 3: Model Training and Selection (`src/models/03_train_and_compare.py`)
--   **Goal:** To compare several machine learning models, select the best one based on performance, and save it for future use.
--   **Process:**
-    1.  It loads the `final_labeled_data.csv` file.
-    2.  The data is split into a training set (80%) and a testing set (20%).
-    3.  A suite of classifiers (Random Forest, Logistic Regression, SVM, K-Nearest Neighbors, and Gradient Boosting) are trained and evaluated on the same data.
-    4.  The script identifies the classifier with the highest accuracy.
-    5.  The best-performing model is saved to `models/motion_detection_model.joblib`.
-    6.  The performance metrics for all classifiers are saved to `reports/classifier_comparison_results.csv`.
-
-### Step 4: Prediction (`src/models/04_predict.py`)
--   **Goal:** To use the trained model to make a prediction on a new, unseen data sample.
--   **Process:**
-    1.  It loads the saved `motion_detection_model.joblib`.
-    2.  It applies the same feature extraction process to a new data sample.
-    3.  It feeds the extracted features to the loaded model to get a prediction.
-
-## Classifier Selection Rationale
-
-To ensure we selected a robust model, we compared the performance of several well-known classifiers on our dataset. The results are summarized below:
-
-| Classifier | Accuracy | F1-Score (approaching) | F1-Score (receding) |
-| :--- | :--- | :--- | :--- |
-| **Gradient Boosting** | **0.8089** | **0.86** | **0.71** |
-| **Random Forest** | 0.8017 | 0.85 | 0.70 |
-| **Logistic Regression** | 0.7767 | 0.83 | 0.68 |
-| **Support Vector Machine**| 0.7509 | 0.80 | 0.68 |
-| **K-Nearest Neighbors** | 0.7137 | 0.78 | 0.57 |
-
-Based on this comparison, **Gradient Boosting** was automatically selected as the best-performing model and saved for use in the prediction script. While Random Forest also performed very well, Gradient Boosting demonstrated a slight edge in overall accuracy and F1-Score for this specific dataset.
-
-## Project Structure
-
-The project is organized into a standard machine learning project structure to ensure clarity and maintainability:
-
--   `data/`: Contains the raw sensor data and the processed feature datasets.
--   `docs/`: For project documentation.
--   `models/`: Stores the final, trained machine learning model files.
--   `reports/`: Contains generated reports and figures.
--   `src/`: Contains all the source code for the project.
--   `run_pipeline.sh`: A shell script to run the entire pipeline from start to finish.
-
-## How to Run the Project
-
-1.  **Install Dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-2.  **Run the Pipeline:**
-    To run the entire pipeline, from data processing to prediction and visualization, simply execute the `run_pipeline.sh` script:
-    ```bash
-    bash run_pipeline.sh
-    ```
-
-## Visualizations and Interpretation
-
-The pipeline generates several visualizations, which are saved in the `reports/figures/` directory.
-
--   **`confusion_matrix.png`:** Shows how the trained model performed on the test data.
--   **`label_distribution.png`:** Shows the distribution of the 'approaching', 'receding', and 'stationary' labels in the training data.
--   **`feature_distribution.png`:** Shows the distribution of the 'Peak Frequency' for each of the original file labels.
--   **`distance_over_time_signal_1500_metal_plate.png`:** A plot of the distance over time for one of the raw data files.
--   **`classifier_comparison.png`:** A bar chart visually comparing the performance of the different classifiers.
+## 📊 How to Run
+Execute the full automated pipeline:
+```bash
+bash run_pipeline.sh
+```
+All terminal output, including performance metrics and training progress, will be visible in the terminal and saved to **`processing.log`**. Visualizations are exported to **`reports/figures/`**.
