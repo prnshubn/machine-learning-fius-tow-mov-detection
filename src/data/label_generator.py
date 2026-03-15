@@ -11,6 +11,7 @@ Industry Approach:
 - Boundary Erosion: Prevents 'label bleeding' where transition frames confuse the model.
 - Quadratic Solver: Uses physics-based formulas (distance, velocity, acceleration) 
   for accurate impact prediction, outperforming simple linear models.
+- Vectorized Operations: Replaces slow row-wise iteration with np.vectorize for scale.
 """
 
 import pandas as pd
@@ -128,7 +129,7 @@ def refine_labels_by_distance():
     1. Threshold velocity to identify directional 'Towards' motion.
     2. Apply majority-vote smoothing (window=3) to remove single-frame glitches.
     3. Apply boundary erosion to isolate the core of the movement.
-    4. Solve the quadratic kinematic equation to calculate precise TTC.
+    4. Solve the quadratic kinematic equation to calculate precise TTC (Vectorized).
     5. Save the finalized dataset to data/processed/final_labeled_data.csv.
     """
     feature_dataset_path = 'data/processed/features.csv'
@@ -148,6 +149,15 @@ def refine_labels_by_distance():
     VELOCITY_THRESHOLD = 0.05    # m/s (Directional velocity noise floor)
 
     logger.info(f"Generating labels: threshold={VELOCITY_THRESHOLD} m/s, erosion={BOUNDARY_EROSION_FRAMES} frames")
+
+    # Define a wrapper for vectorization that includes the logical checks
+    def _conditional_ttc(motion, dist, vel, accel):
+        if motion == 'towards' and not np.isnan(dist) and abs(vel) > 0.01:
+            return _kinematic_ttc(dist, vel, accel)
+        return np.nan
+
+    # Vectorize the function (specifying float output for NaNs and precision)
+    vec_kinematic_ttc = np.vectorize(_conditional_ttc, otypes=[float])
 
     # Group by session (object type) to ensure independent processing
     for session_name, group_df in df.groupby(session_id_col):
@@ -178,25 +188,14 @@ def refine_labels_by_distance():
             np.nan,
         )
 
-        # Step 5: High-precision TTC via quadratic kinematic solver
-        ttc_values = []
-        for _, row in group_df.iterrows():
-            if (
-                row['motion'] == 'towards'
-                and not np.isnan(row['calc_dist_m'])
-                and abs(row['velocity']) > 0.01
-            ):
-                # Solving the quadratic for impact time (TTC)
-                ttc = _kinematic_ttc(
-                    distance=row['calc_dist_m'],
-                    velocity=row['velocity'],
-                    acceleration=row['acceleration'],
-                )
-                ttc_values.append(ttc)
-            else:
-                ttc_values.append(np.nan)
+        # Step 5: High-precision TTC via vectorized kinematic solver
+        group_df['ttc'] = vec_kinematic_ttc(
+            group_df['motion'],
+            group_df['calc_dist_m'],
+            group_df['velocity'],
+            group_df['acceleration']
+        )
 
-        group_df['ttc'] = ttc_values
         processed_groups.append(group_df)
         logger.info(f"  Processed '{session_name}': {len(group_df)} rows")
 

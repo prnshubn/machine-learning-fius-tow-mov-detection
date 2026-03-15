@@ -71,10 +71,12 @@ run_pipeline() {
     python3 src/visualization/plot_label_distribution.py
     if [ $? -ne 0 ]; then echo "  Warning: label distribution plot failed"; fi
 
+    python3 src/visualization/plot_raw_echo.py
+    if [ $? -ne 0 ]; then echo "  Warning: raw echo plot failed"; fi
+
     python3 src/visualization/plot_classifier_comparison.py
     if [ $? -ne 0 ]; then echo "  Warning: classifier comparison plot failed"; fi
 
-    # New plots
     echo "  Generating confusion matrix heatmap..."
     python3 src/visualization/plot_confusion_matrix.py
     if [ $? -ne 0 ]; then echo "  Warning: confusion matrix plot failed"; fi
