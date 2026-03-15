@@ -40,7 +40,7 @@ def plot_classifier_comparison():
     plt.ylabel('Score (0.0 - 1.0)', fontsize=12)
     plt.xlabel('Algorithm', fontsize=12)
     plt.ylim(0, 1.1) 
-    plt.xticks(rotation=0) # Keep names horizontal for readability
+    plt.xticks(rotation=45, ha='right') # Rotate for better readability
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     plt.legend(loc='upper right', bbox_to_anchor=(1.15, 1))
     plt.tight_layout()

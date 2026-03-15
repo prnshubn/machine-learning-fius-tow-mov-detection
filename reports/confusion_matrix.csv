@@ -1,3 +1,3 @@
-,Pred: towards,Pred: not_towards
-Actual: towards,254,19
-Actual: not_towards,477,650
+Actual,Pred: towards,Pred: not_towards
+Actual: towards,256,17
+Actual: not_towards,471,656

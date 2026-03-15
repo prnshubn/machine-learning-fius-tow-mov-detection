@@ -1,24 +1,14 @@
 """
-This script provides a framework for processing ultrasonic sensor data to detect moving objects.
-It includes functions to load data, perform a Fast Fourier Transform (FFT) to analyze the frequency
-spectrum, and extract relevant features from the spectrum. These features can then be used to train
-a machine learning model.
+Signal Processing Module: Utilities for Ultrasonic Data Analysis.
 
-Main functionalities:
-- Load sensor data from CSV files
-- Perform FFT to extract frequency domain features
-- Calculate kinematic features (velocity, acceleration)
-- Utility functions for feature extraction and peak detection
+This module provides the core signal processing algorithms for the project,
+including Fast Fourier Transform (FFT) analysis, spectral feature extraction,
+and noise-adaptive echo peak detection.
 
-FIX (C) — Noise-floor std: find_first_peak_index now computes std only on
-    the post-blanking region (samples > min_index), so the high-amplitude
-    transmitted pulse no longer inflates the detection threshold. This makes
-    the detector more sensitive to weak echoes from soft or distant objects.
-
-FIX (B1) — Shared constants: ECHO_MIN_INDEX and ECHO_THRESHOLD_MULTIPLIER
-    are now defined here and imported by both feature_extractor.py and
-    predictor.py, guaranteeing identical echo_index distributions at train
-    and inference time.
+Key Components:
+- FFT Analysis: Converts time-domain ADC samples into frequency-domain magnitudes.
+- Spectral Features: Calculates centroid, skewness, and kurtosis to characterize echoes.
+- Peak Detection: Implements a 3-sigma noise-floor-adaptive search for the first echo.
 """
 
 import pandas as pd
@@ -27,55 +17,53 @@ from scipy.stats import skew
 
 
 # --- Constants ---
-SENSOR_FREQUENCY = 40000   # 40 kHz — frequency of the emitted ultrasonic pulse
-ADC_DATA_START_INDEX = 17  # Starting column index of the raw ADC data in CSV files
+SENSOR_FREQUENCY = 40000   # 40 kHz center frequency of the ultrasonic transducer
+ADC_DATA_START_INDEX = 17  # Index where raw ADC voltage samples begin in the CSV
 
-# Shared echo-detection parameters — imported by feature_extractor.py AND predictor.py.
-# Changing a value here propagates to both train and inference automatically.
-ECHO_MIN_INDEX            = 20  # Blank first 20 samples (transmitted-pulse zone)
-ECHO_THRESHOLD_MULTIPLIER = 4   # 4-sigma detection threshold
+# Shared parameters for peak detection consistency
+# These are used by both training (feature_extractor) and inference (predictor)
+ECHO_MIN_INDEX            = 20  # Skip first 20 samples to avoid Tx pulse contamination
+ECHO_THRESHOLD_MULTIPLIER = 4   # Use 4-sigma for robust noise rejection
 
 
 def load_data(filepath, nrows=None):
     """
-    Load data from a CSV file.
+    Loads raw sensor data from a CSV file.
 
     Args:
-        filepath (str): Path to the CSV file.
-        nrows (int, optional): Number of rows to read. Defaults to None (read all).
+        filepath (str): Path to the CSV.
+        nrows (int, optional): Number of rows for partial reading.
 
     Returns:
-        pandas.DataFrame | None
+        pd.DataFrame or None: Loaded data or None if file error occurs.
     """
     try:
         return pd.read_csv(filepath, nrows=nrows)
-    except FileNotFoundError:
-        print(f"Error: The file '{filepath}' was not found.")
-        return None
     except Exception as e:
-        print(f"An error occurred while reading the file: {e}")
+        print(f"Error loading {filepath}: {e}")
         return None
 
 
 def perform_fft(data_frame, sampling_rate):
     """
-    Perform a Fast Fourier Transform (FFT) on the raw ADC data.
-    Removes the DC offset (mean) to ensure peak frequency detection is accurate.
+    Computes the Fast Fourier Transform of the ADC signal.
+
+    The signal is first DC-centered (mean removed) to prevent the DC bin (0 Hz)
+    from dominating the spectral analysis.
 
     Args:
-        data_frame (pandas.DataFrame): Input data containing raw ADC values.
-        sampling_rate (int): Sampling rate of the sensor in Hz.
+        data_frame (pd.DataFrame): Data containing ADC columns.
+        sampling_rate (int): Sampling frequency in Hz.
 
     Returns:
-        tuple: (frequencies, magnitudes) or (None, None) if ADC data is missing.
+        tuple: (positive_frequencies, positive_magnitudes)
     """
     adc_data = data_frame.iloc[:, ADC_DATA_START_INDEX:].values.flatten()
 
     if adc_data.size == 0:
-        print("Error: No ADC data found from the specified start index.")
         return None, None
 
-    # Remove DC offset
+    # DC-offset removal (centering around zero)
     adc_data_centered = adc_data - np.mean(adc_data)
 
     fft_result = np.fft.fft(adc_data_centered)
@@ -84,6 +72,7 @@ def perform_fft(data_frame, sampling_rate):
     n = len(adc_data)
     frequencies = np.fft.fftfreq(n, d=1 / sampling_rate)
 
+    # Keep only the positive half of the spectrum (symmetry)
     positive_frequencies = frequencies[1:n // 2]
     positive_magnitudes  = fft_magnitude[1:n // 2]
 
@@ -92,22 +81,24 @@ def perform_fft(data_frame, sampling_rate):
 
 def extract_spectral_features(frequencies, magnitudes):
     """
-    Extract spectral features from the FFT result.
+    Extracts statistical descriptors from the frequency spectrum.
 
     Args:
-        frequencies (numpy.ndarray): Frequency axis from the FFT.
-        magnitudes  (numpy.ndarray): Corresponding magnitude values.
+        frequencies (np.ndarray): Spectral frequency axis.
+        magnitudes (np.ndarray): Magnitude values.
 
     Returns:
-        dict | None
+        dict: Features including Peak Freq, Centroid, Skewness, and Kurtosis.
     """
-    if frequencies is None or magnitudes is None or frequencies.size == 0 or magnitudes.size == 0:
+    if frequencies is None or magnitudes is None or frequencies.size == 0:
         return None
 
     peak_frequency    = frequencies[np.argmax(magnitudes)]
     mean_frequency    = np.average(frequencies, weights=magnitudes)
     spectral_centroid = np.sum(frequencies * magnitudes) / np.sum(magnitudes)
     spectral_skewness = skew(magnitudes)
+    
+    # Spectral Kurtosis: measures the 'peakedness' of the spectrum
     spectral_kurtosis = (
         np.sum(((frequencies - mean_frequency) ** 4) * magnitudes)
         / (np.sum(magnitudes) * (np.std(frequencies) ** 4))
@@ -124,35 +115,24 @@ def extract_spectral_features(frequencies, magnitudes):
 
 def find_first_peak_index(adc_data, threshold_multiplier=3, min_index=0):
     """
-    Find the index of the first echo peak in DC-centred ADC data.
+    Detects the first significant echo peak using an adaptive threshold.
 
-    Uses a two-sided absolute-value threshold so that both positive and negative
-    reflection peaks are detected.
-
-    FIX (C) — Noise-floor estimation:
-        Previously, std was computed over the ENTIRE window, meaning the large
-        transmitted pulse at the start inflated std and raised the detection
-        threshold — making the detector blind to weak echoes from soft/distant
-        objects (e.g. humans at range).
-
-        Now, std is computed only on the post-blanking region (samples after
-        min_index). This estimates the true noise floor without contamination
-        from the TX pulse, making the detector significantly more sensitive.
+    The threshold is defined as (multiplier * noise_std). To ensure sensitivity
+    to distant objects, the noise floor (std) is estimated ONLY on the samples
+    after the initial blanking period (min_index).
 
     Args:
-        adc_data           (numpy.ndarray): DC-centred ADC row.
-        threshold_multiplier (float): Sigma multiplier for the detection threshold.
-            Default 3 (3-sigma). Use ECHO_THRESHOLD_MULTIPLIER (4) for training.
-        min_index (int): Ignore any peaks at sample indices <= this value.
-            Blanks the transmitted pulse zone. Use ECHO_MIN_INDEX (20) everywhere.
+        adc_data (np.ndarray): DC-centered ADC signal row.
+        threshold_multiplier (float): Sensitivity factor (sigma multiplier).
+        min_index (int): Number of initial samples to ignore (Tx pulse zone).
 
     Returns:
-        int: Index of the first detected echo peak, or -1 if none found.
+        int: Sample index of the first peak, or -1 if not found.
     """
     if adc_data is None or adc_data.size == 0:
         return -1
 
-    # FIX (C): estimate noise floor only on the blanked (post-TX-pulse) region
+    # Estimate noise floor on the valid echo region only (after Tx pulse)
     if min_index > 0 and min_index < len(adc_data):
         noise_region = adc_data[min_index:]
     else:
@@ -164,10 +144,10 @@ def find_first_peak_index(adc_data, threshold_multiplier=3, min_index=0):
 
     threshold = threshold_multiplier * std_val
 
-    # Two-sided: detect positive AND negative reflection peaks
+    # Detect all points crossing the threshold (two-sided for phase robustness)
     peaks = np.where(np.abs(adc_data) > threshold)[0]
 
-    # Blank the transmitted-pulse zone
+    # Filter out samples in the blanking zone
     if min_index > 0:
         peaks = peaks[peaks > min_index]
 
@@ -176,11 +156,14 @@ def find_first_peak_index(adc_data, threshold_multiplier=3, min_index=0):
 
 def extract_echo_shape_features(adc_data, echo_index):
     """
-    Extract amplitude and Full-Width at Half-Maximum (FWHM) width of a detected echo.
+    Computes the amplitude and FWHM (Full-Width at Half-Maximum) of a peak.
+
+    Width helps distinguish surface materials (hard surfaces return sharp/narrow
+    echoes, soft surfaces return broad/diffuse ones).
 
     Args:
-        adc_data    (numpy.ndarray): DC-centred ADC row.
-        echo_index  (int): Sample index of the detected peak. Pass -1 for no detection.
+        adc_data (np.ndarray): ADC signal row.
+        echo_index (int): Index of the detected peak.
 
     Returns:
         dict: {'echo_amplitude': float, 'echo_width': float}
@@ -191,35 +174,37 @@ def extract_echo_shape_features(adc_data, echo_index):
         return {'echo_amplitude': 0.0, 'echo_width': 0.0}
 
     amplitude = float(np.abs(adc_data[echo_index]))
-
     if amplitude == 0.0:
         return {'echo_amplitude': 0.0, 'echo_width': 0.0}
 
     half_max = amplitude / 2.0
 
+    # Walk left to find half-max boundary
     left = echo_index
     while left > 0 and np.abs(adc_data[left - 1]) >= half_max:
         left -= 1
 
+    # Walk right to find half-max boundary
     right = echo_index
     while right < n - 1 and np.abs(adc_data[right + 1]) >= half_max:
         right += 1
 
     width = float(right - left + 1)
-
     return {'echo_amplitude': amplitude, 'echo_width': width}
 
 
 def calculate_kinematics(distances, timestamps):
     """
-    Calculate velocity and acceleration from distance and timestamp arrays.
+    Calculates raw velocity and acceleration (simple finite difference).
+
+    Note: For production inference, use the Kalman Filter instead of this function.
 
     Args:
-        distances  (pandas.Series | numpy.ndarray): Distance measurements.
-        timestamps (pandas.Series | numpy.ndarray): Timestamps in milliseconds.
+        distances (pd.Series): Distance measurements.
+        timestamps (pd.Series): Timestamps in milliseconds.
 
     Returns:
-        tuple: (velocity, acceleration) as pandas.Series.
+        tuple: (velocity, acceleration)
     """
     if not isinstance(distances, pd.Series):
         distances = pd.Series(distances)
@@ -236,7 +221,7 @@ def calculate_kinematics(distances, timestamps):
 
 
 def main():
-    """Demonstrate the processing pipeline on a sample file."""
+    """Demonstrates the processing pipeline on a sample file."""
     SAMPLING_RATE = 1953125
     data_file = 'data/raw/signal_1500_metal_plate.csv'
 
@@ -258,8 +243,8 @@ def main():
                 print("--------------------------\n")
                 print("--- Interpretation ---")
                 print(f"Emitted frequency: {SENSOR_FREQUENCY / 1000} kHz")
-                print("Towards → Peak/Mean Frequency slightly above emitted frequency (Doppler).")
-                print("Away    → Peak/Mean Frequency slightly below emitted frequency.")
+                print("Towards → Peak/Mean Frequency slightly above center (Doppler).")
+                print("Away    → Peak/Mean Frequency slightly below center.")
                 print("----------------------")
 
 

@@ -1,23 +1,17 @@
 """
-Real-time Prediction Simulation: Uses PURE SENSOR DATA to detect approaches.
-Implements QUAD-SCALE temporal windows (5, 10, 25, 50) for dynamic inference.
+Real-time Inference Simulation: Production-Grade Tracking Logic.
 
-FIX (B1) — Shared echo constants:
-    ECHO_MIN_INDEX and ECHO_THRESHOLD_MULTIPLIER are now imported from
-    processing.py, matching the values used in feature_extractor.py exactly.
+This module simulates the real-time operation of the collision prediction system.
+It processes raw sensor data frame-by-frame, maintaining a temporal buffer to 
+calculate 'Quad-Scale' features and providing low-latency predictions.
 
-FIX (B2) — Per-frame Kalman dt:
-    The Kalman filter is initialised with the mean dt from the file's timestamps,
-    but each update() call now also passes the real inter-frame interval. This
-    keeps kinematics synchronised with the actual sensor clock even when the
-    frame rate jitters.
-
-FIX (D) — sklearn Pipeline:
-    The predictor loads a single Pipeline artifact (StandardScaler + model).
-    There is no separate scaler file. Calling pipeline.predict(X_raw) applies
-    scaling automatically in the correct column order — making feature-ordering
-    bugs impossible at inference time.
+Industry Approach:
+- Decoupled Pre-computation: Heavy FFT logic is handled separately (simulating DSP hardware).
+- Circular Buffering: Uses 'deque' for efficient sliding-window feature calculation.
+- Performance Profiling: Measures per-frame latency to validate 'Real-Time' capability.
+- Model Pipelines: Loads atomic artifacts to ensure inference matches training scaling.
 """
+
 import os
 import sys
 import time
@@ -28,32 +22,33 @@ import numpy as np
 import logging
 from collections import deque
 
+# Setup production-grade logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Ensure package root is in path for absolute imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from src.data.processing import (
     ADC_DATA_START_INDEX,
-    ECHO_MIN_INDEX,               # FIX (B1): shared constant
-    ECHO_THRESHOLD_MULTIPLIER,    # FIX (B1): shared constant
+    ECHO_MIN_INDEX,
+    ECHO_THRESHOLD_MULTIPLIER,
     find_first_peak_index,
     extract_echo_shape_features,
 )
 from src.data.kalman import KalmanFilter
 from src.models.detectors import AutoencoderDetector
 
-# Quad-scale windows — must match model_trainer.py and feature_extractor.py
+# Window configuration (MUST match model_trainer.py)
 WINDOWS = [5, 10, 25, 50]
 
 
 def _build_motion_feature_vector(echo_idx, echo_shape, peak_freq, spectral_centroid,
                                   buffer_echo, buffer_centroid):
     """
-    Construct the ordered 17-feature dict used by the motion Pipeline.
+    Assembles the 17-element feature vector for the motion detection pipeline.
 
-    FIX (D): column order is derived from the same helper used in model_trainer.py.
-    The Pipeline's internal StandardScaler handles scaling; we pass raw values.
+    The vector includes instantaneous measurements and temporal window statistics.
     """
     feat = {
         'echo_index':        echo_idx,
@@ -62,6 +57,7 @@ def _build_motion_feature_vector(echo_idx, echo_shape, peak_freq, spectral_centr
         'Peak Frequency':    peak_freq,
         'Spectral Centroid': spectral_centroid,
     }
+    # Calculate Mean and Trend for each scale based on buffered history
     for w in WINDOWS:
         feat[f'Trend_{w}']         = buffer_echo[-1]     - buffer_echo[-w]
         feat[f'Mean_{w}']          = np.mean(list(buffer_echo)[-w:])
@@ -70,25 +66,27 @@ def _build_motion_feature_vector(echo_idx, echo_shape, peak_freq, spectral_centr
 
 
 def main():
+    """
+    Main entry point for real-time tracking simulation on a raw data file.
+    """
     parser = argparse.ArgumentParser(description='Simulate real-time tracking on raw sensor data.')
     parser.add_argument('filepath', type=str, help='Path to a raw sensor CSV file.')
     args = parser.parse_args()
 
-    # ------------------------------------------------------------------
-    # 1. Load Pipeline artifacts  (FIX D: single file, no separate scaler)
-    # ------------------------------------------------------------------
+    # Step 1: Load Serialized Pipelines
+    # Pipelines bundle the scaler and model into one object for safety and consistency.
     try:
         motion_pipeline = joblib.load('models/motion_detection_model.joblib')
         ttc_pipeline    = joblib.load('models/ttc_prediction_model.joblib')
-        logger.info("Loaded model pipelines successfully.")
+        logger.info("Inference pipelines loaded successfully.")
     except Exception as e:
-        logger.error(f"Could not load pipelines: {e}")
+        logger.error(f"Initialization failure (missing models?): {e}")
         sys.exit(1)
 
-    # ------------------------------------------------------------------
-    # 2. Batch pre-computation (FFT over the whole file)
-    # ------------------------------------------------------------------
-    logger.info(f"Analysing: {os.path.basename(args.filepath)}")
+    # Step 2: DSP Pre-processing (FFT)
+    # Note: In a production embedded system, this step would happen in a 
+    # hardware DSP co-processor or FPGA before the ML engine.
+    logger.info(f"Analyzing file: {os.path.basename(args.filepath)}")
     df_raw        = pd.read_csv(args.filepath, header=None)
     SAMPLING_RATE = 1953125
 
@@ -97,146 +95,101 @@ def main():
 
     fft_results = np.fft.fft(adc_centered, axis=1)
     magnitudes  = np.abs(fft_results[:, 1:adc_matrix.shape[1] // 2])
-    frequencies = np.fft.fftfreq(
-        adc_matrix.shape[1], d=1 / SAMPLING_RATE
-    )[1:adc_matrix.shape[1] // 2]
+    frequencies = np.fft.fftfreq(adc_matrix.shape[1], d=1 / SAMPLING_RATE)[1:adc_matrix.shape[1] // 2]
 
     peak_freqs         = frequencies[np.argmax(magnitudes, axis=1)]
     sum_mags           = np.sum(magnitudes, axis=1)
     spectral_centroids = np.sum(frequencies * magnitudes, axis=1) / sum_mags
 
-    # ------------------------------------------------------------------
-    # 3. Kalman Filter initialisation  (FIX B2: mean dt from timestamps)
-    # ------------------------------------------------------------------
+    # Step 3: Initialize Temporal Buffers and Kalman Filter
     timestamps_ms = df_raw.iloc[:, 16].values
     dt_avg = np.mean(np.diff(timestamps_ms)) / 1000.0
-    if np.isnan(dt_avg) or dt_avg <= 0:
-        dt_avg = 0.045
-    kf = KalmanFilter(dt=dt_avg)
-    logger.info(f"Kalman filter dt initialised from timestamps: {dt_avg*1000:.2f} ms")
+    kf = KalmanFilter(dt=dt_avg if dt_avg > 0 else 0.045)
 
-    # ------------------------------------------------------------------
-    # 4. Streaming simulation — one row at a time
-    # ------------------------------------------------------------------
     MAX_W           = max(WINDOWS)
-    buffer_echo     = deque(maxlen=MAX_W)
-    buffer_centroid = deque(maxlen=MAX_W)
+    buffer_echo     = deque(maxlen=MAX_W)     # Rolling window for arrival time
+    buffer_centroid = deque(maxlen=MAX_W)     # Rolling window for spectral shape
 
     towards_count   = 0
     predicted_ttcs  = []
     frame_latencies = []
 
-    # Column order must match _build_classification_features() in model_trainer.py
-    motion_cols = ['echo_index', 'echo_amplitude', 'echo_width',
-                   'Peak Frequency', 'Spectral Centroid']
+    # Column ordering must strictly match the training features
+    motion_cols = ['echo_index', 'echo_amplitude', 'echo_width', 'Peak Frequency', 'Spectral Centroid']
     for w in WINDOWS:
         motion_cols.extend([f'Trend_{w}', f'Mean_{w}', f'Centroid_Trend_{w}'])
 
-    ttc_cols = [
-        'velocity', 'acceleration', 'echo_index',
-        'Peak Frequency', 'Spectral Centroid', 'Trend_25',
-    ]
+    ttc_cols = ['velocity', 'acceleration', 'echo_index', 'Peak Frequency', 'Spectral Centroid', 'Trend_25']
 
+    # Step 4: Per-Frame Processing Loop (The 'Real-Time' Simulation)
     for i in range(len(df_raw)):
-
-        # FIX (B2): compute actual inter-frame dt and pass it to the Kalman update
-        if i > 0:
-            dt_frame = (timestamps_ms[i] - timestamps_ms[i - 1]) / 1000.0
-            if dt_frame <= 0 or np.isnan(dt_frame):
-                dt_frame = None          # fallback: KalmanFilter uses constructor dt
-        else:
-            dt_frame = None
-
+        # Calculate real delta-time for Kalman sync
+        dt_frame = (timestamps_ms[i] - timestamps_ms[i - 1]) / 1000.0 if i > 0 else None
+        
+        # A. Update Kinematics (Filtered Dist, Velocity, Accel)
         _, f_vel, f_accel = kf.update(df_raw.iloc[i, 10], dt=dt_frame)
 
-        # --- Echo detection (FIX B1: shared constants from processing.py) ---
-        echo_idx = float(
-            find_first_peak_index(
-                adc_centered[i],
-                threshold_multiplier=ECHO_THRESHOLD_MULTIPLIER,
-                min_index=ECHO_MIN_INDEX,
-            )
-        )
+        # B. Signal Processing: Echo Detection and Shape Extraction
+        echo_idx = float(find_first_peak_index(adc_centered[i], 
+                                               threshold_multiplier=ECHO_THRESHOLD_MULTIPLIER, 
+                                               min_index=ECHO_MIN_INDEX))
+        echo_shape = extract_echo_shape_features(adc_centered[i], int(echo_idx) if echo_idx >= 0 else -1)
 
-        # --- Echo shape features ---
-        echo_shape = extract_echo_shape_features(
-            adc_centered[i], int(echo_idx) if echo_idx >= 0 else -1
-        )
-
+        # C. Buffer update
         buffer_echo.append(echo_idx)
         buffer_centroid.append(spectral_centroids[i])
 
+        # D. Ensure buffer is full before attempting prediction
         if len(buffer_echo) < MAX_W:
             continue
 
-        # --- Start latency clock (ML prediction only) ---
+        # --- Inference Latency Measurement Start ---
         t_start = time.perf_counter()
 
-        # --- Build feature vector and predict (FIX D: Pipeline handles scaling) ---
-        feat_dict = _build_motion_feature_vector(
-            echo_idx, echo_shape, peak_freqs[i], spectral_centroids[i],
-            buffer_echo, buffer_centroid,
-        )
+        # E. Stage 1: Motion Classification (Towards vs Not Towards)
+        feat_dict = _build_motion_feature_vector(echo_idx, echo_shape, peak_freqs[i], spectral_centroids[i], buffer_echo, buffer_centroid)
         X_motion = pd.DataFrame([feat_dict])[motion_cols]
-
-        # FIX (D): pipeline.predict() applies StandardScaler then model internally
         prediction = motion_pipeline.predict(X_motion)[0]
 
+        # F. Stage 2: TTC Regression (Only if Stage 1 detects an approach)
         if prediction == 1:
             towards_count += 1
-
             ttc_feat = {
-                'velocity':          f_vel,
-                'acceleration':      f_accel,
-                'echo_index':        echo_idx,
-                'Peak Frequency':    peak_freqs[i],
-                'Spectral Centroid': spectral_centroids[i],
-                'Trend_25':          buffer_echo[-1] - list(buffer_echo)[-25],
+                'velocity':          f_vel, 
+                'acceleration':      f_accel, 
+                'echo_index':        echo_idx, 
+                'Peak Frequency':    peak_freqs[i], 
+                'Spectral Centroid': spectral_centroids[i], 
+                'Trend_25':          buffer_echo[-1] - list(buffer_echo)[-25]
             }
             X_ttc = pd.DataFrame([ttc_feat])[ttc_cols]
-
-            # FIX (D): ttc_pipeline handles its own scaling
             predicted_ttcs.append(max(0.0, ttc_pipeline.predict(X_ttc)[0]))
 
-        # --- Stop latency clock ---
+        # --- Inference Latency Measurement Stop ---
         t_end = time.perf_counter()
         frame_latencies.append((t_end - t_start) * 1000.0)
 
-    # ------------------------------------------------------------------
-    # 5. Report
-    # ------------------------------------------------------------------
-    n_frames        = len(frame_latencies)
-    mean_latency_ms = np.mean(frame_latencies)  if n_frames else 0.0
-    max_latency_ms  = np.max(frame_latencies)   if n_frames else 0.0
-    p99_latency_ms  = np.percentile(frame_latencies, 99) if n_frames else 0.0
-    approx_period_ms = (5 * 60 * 1000) / max(len(df_raw), 1)
+    # Step 5: Final Performance Reporting
+    avg_latency = np.mean(frame_latencies) if frame_latencies else 0.0
+    # Average sensor firing rate derived from record length (5 mins)
+    sensor_period = (5 * 60 * 1000) / max(len(df_raw), 1)
 
-    logger.info("Analysis complete.")
     print("\n" + "=" * 45)
-    print("QUAD-SCALE DETECTION REPORT")
+    print("SIMULATION PERFORMANCE REPORT")
     print("=" * 45)
-    print(f"File           : {os.path.basename(args.filepath)}")
-    print(f"Frames analysed: {len(df_raw)}")
-    print(f"Towards frames : {towards_count}")
-
+    print(f"File: {os.path.basename(args.filepath)}")
+    print(f"Processed: {len(df_raw)} frames")
+    print(f"Approaches: {towards_count} frames")
     if predicted_ttcs:
-        print(f"Min TTC        : {min(predicted_ttcs):.2f} s")
-        print(f"Mean TTC       : {np.mean(predicted_ttcs):.2f} s")
-
-    print(f"Movement present: {'YES' if towards_count > 15 else 'NO'}")
-
-    print("\n--- Latency (ML prediction only) ---")
-    print(f"  Mean          : {mean_latency_ms:.3f} ms")
-    print(f"  Max           : {max_latency_ms:.3f} ms")
-    print(f"  p99           : {p99_latency_ms:.3f} ms")
-    print(f"  Sensor period : ~{approx_period_ms:.1f} ms/frame")
-
-    if mean_latency_ms < approx_period_ms:
-        print(f"  Verdict       : REAL-TIME CAPABLE "
-              f"(mean {mean_latency_ms:.2f} ms < {approx_period_ms:.1f} ms period)")
+        print(f"Min TTC: {min(predicted_ttcs):.2f} s | Mean TTC: {np.mean(predicted_ttcs):.2f} s")
+    
+    print(f"\nAvg Prediction Latency: {avg_latency:.3f} ms")
+    print(f"Sensor Period: ~{sensor_period:.1f} ms")
+    
+    if avg_latency < sensor_period:
+        print("Status: REAL-TIME CAPABLE ✅")
     else:
-        print("  Verdict       : WARNING — mean prediction latency exceeds sensor period.")
-
+        print("Status: LATENCY WARNING ⚠️")
     print("=" * 45)
 
 

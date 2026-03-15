@@ -1,13 +1,16 @@
 """
 Feature Engineering Module: Extracts raw sensor features from radar ADC data.
-Uses QUAD-SCALE TEMPORAL WINDOWS (5, 10, 25, 50) for robust pattern recognition.
 
-FIX (B1) — Shared echo constants:
-    ECHO_MIN_INDEX and ECHO_THRESHOLD_MULTIPLIER are now imported from
-    processing.py instead of being hardcoded. This guarantees that the same
-    blanking window and sigma multiplier are used during training (here) AND
-    during inference (predictor.py), so echo_index distributions match exactly.
+This module processes raw ADC windows into a multi-scale feature dataset. 
+It implements 'Quad-Scale Temporal Windows' (Short, Mid, Long) to capture both 
+instantaneous spikes and long-term trends in object movement.
+
+Industry Approach:
+- Modular extraction: Features are grouped by physical/spectral properties.
+- Quad-Scale Windows: Captures movement dynamics across different time horizons.
+- Shared Constants: Ensures consistency between training and inference data.
 """
+
 import os
 import glob
 import sys
@@ -23,23 +26,26 @@ from src.data.processing import (
 )
 from src.data.kalman import apply_kalman_filter
 
+# Standard industry logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
 def build_feature_dataset():
     """
-    Extract features using Short (5, 10), Mid (25), and Long (50) temporal windows.
+    Main entry point: Orchestrates feature extraction across all raw CSV files.
 
-    Feature groups produced per row:
-      Kinematics  : velocity, acceleration  (from Kalman filter)
-      Echo timing : echo_index              (first peak arrival sample)
-      Echo shape  : echo_amplitude, echo_width (amplitude and FWHM)
-      Spectral    : Peak Frequency, Spectral Centroid
-      Quad-scale  : Trend_W, Mean_W, Centroid_Trend_W  for W in {5, 10, 25, 50}
+    Pipeline:
+    1. Scan data/raw/ for CSV files.
+    2. For each file, compute per-row ADC features (Echo, Spectral, Shape).
+    3. Apply Kalman Filter across the session to derive smooth kinematics.
+    4. Apply Quad-Scale rolling windows to capture temporal dynamics.
+    5. Aggregate and save to data/processed/features.csv.
     """
+    # System Constants
     SAMPLING_RATE = 1953125
-    WINDOWS       = [5, 10, 25, 50]
+    WINDOWS       = [5, 10, 25, 50]  # Window sizes for Quad-Scale analysis
+    
     raw_data_path       = 'data/raw'
     processed_data_path = 'data/processed'
     output_filepath     = os.path.join(processed_data_path, 'features.csv')
@@ -53,26 +59,26 @@ def build_feature_dataset():
 
     logger.info(
         f"Starting Quad-Scale extraction with windows {WINDOWS}, "
-        f"echo min_index={ECHO_MIN_INDEX}, "
-        f"threshold_multiplier={ECHO_THRESHOLD_MULTIPLIER}..."
+        f"echo blanking={ECHO_MIN_INDEX}, "
+        f"sigma_threshold={ECHO_THRESHOLD_MULTIPLIER}..."
     )
     all_features_dfs = []
 
     for filepath in csv_files:
         filename     = os.path.basename(filepath)
+        # Parse session label from filename (e.g., 'signal_1500_metal_plate.csv' -> 'metal_plate')
         object_label = "_".join(filename.replace('.csv', '').split('_')[2:])
 
         try:
             df         = pd.read_csv(filepath, header=None)
             adc_matrix = df.iloc[:, ADC_DATA_START_INDEX:].values
+            
+            # Step 1: Pre-processing (DC Centering)
+            # Center each row independently to normalize signal bias across time
             adc_centered = adc_matrix - np.mean(adc_matrix, axis=1, keepdims=True)
 
-            # ------------------------------------------------------------------
-            # 1. Echo Detection — uses shared constants from processing.py
-            #    FIX (B1): min_index=ECHO_MIN_INDEX matches predictor.py exactly.
-            #    FIX (C):  find_first_peak_index now computes std only on the
-            #              post-blanking region, so weak echoes are not masked.
-            # ------------------------------------------------------------------
+            # Step 2: Per-frame Echo Detection
+            # find_first_peak_index handles adaptive noise floor estimation
             echo_indices = np.array([
                 find_first_peak_index(
                     row,
@@ -82,9 +88,7 @@ def build_feature_dataset():
                 for row in adc_centered
             ], dtype=float)
 
-            # ------------------------------------------------------------------
-            # 2. Echo Shape Features
-            # ------------------------------------------------------------------
+            # Step 3: Echo Shape Analysis (Amplitude and FWHM Width)
             echo_shapes     = [
                 extract_echo_shape_features(row, int(idx) if idx >= 0 else -1)
                 for row, idx in zip(adc_centered, echo_indices)
@@ -92,35 +96,33 @@ def build_feature_dataset():
             echo_amplitudes = np.array([s['echo_amplitude'] for s in echo_shapes])
             echo_widths     = np.array([s['echo_width']     for s in echo_shapes])
 
-            # ------------------------------------------------------------------
-            # 3. Spectral Features
-            # ------------------------------------------------------------------
+            # Step 4: Spectral Transformation (Fast Fourier Transform)
             fft_results  = np.fft.fft(adc_centered, axis=1)
             n_samples    = adc_matrix.shape[1]
             magnitudes   = np.abs(fft_results[:, 1:n_samples // 2])
             frequencies  = np.fft.fftfreq(n_samples, d=1 / SAMPLING_RATE)[1:n_samples // 2]
+            
+            # Identify dominant frequency (Doppler shift) and Spectral Centroid
             peak_freqs        = frequencies[np.argmax(magnitudes, axis=1)]
             spectral_centroids = (
                 np.sum(frequencies * magnitudes, axis=1)
                 / np.sum(magnitudes, axis=1)
             )
 
-            # ------------------------------------------------------------------
-            # 4. Kinematics via Kalman Filter
-            #    Column 10 = distance measurement, column 16 = timestamp (ms)
-            # ------------------------------------------------------------------
+            # Step 5: Kinematics via Sensor Fusion (Kalman Filter)
+            # Inputs: Distance col 10, Timestamp col 16
             _, velocity, acceleration = apply_kalman_filter(
                 df.iloc[:, 10], df.iloc[:, 16]
             )
 
-            # ------------------------------------------------------------------
-            # 5. Quad-Scale Temporal Features
-            # ------------------------------------------------------------------
+            # Step 6: Temporal Quad-Scale Windowing
+            # Rolling windows capture the stability (Mean) and rate of change (Trend)
             temp_df = pd.DataFrame({
                 'echo':     echo_indices,
                 'centroid': spectral_centroids,
             })
 
+            # Base feature dictionary
             feature_dict = {
                 'label':             object_label,
                 'timestamp':         df.iloc[:, 16].values,
@@ -133,9 +135,13 @@ def build_feature_dataset():
                 'Spectral Centroid': spectral_centroids,
             }
 
+            # Generate rolling features for each scale in {5, 10, 25, 50}
             for w in WINDOWS:
+                # Trend: Absolute change over the window
                 feature_dict[f'Trend_{w}']         = temp_df['echo'].diff(periods=w - 1).fillna(0).values
+                # Mean: Average position to smooth jitter
                 feature_dict[f'Mean_{w}']           = temp_df['echo'].rolling(window=w, min_periods=1).mean().values
+                # Centroid Trend: Change in spectral shape (Doppler dynamics)
                 feature_dict[f'Centroid_Trend_{w}'] = temp_df['centroid'].diff(periods=w - 1).fillna(0).values
 
             all_features_dfs.append(pd.DataFrame(feature_dict))
@@ -144,16 +150,14 @@ def build_feature_dataset():
         except Exception as e:
             logger.error(f"Error processing {filename}: {e}")
 
+    # Step 7: Final Consolidation and Persistence
     if not all_features_dfs:
-        logger.error("No feature data was produced. Check raw files and ADC column layout.")
+        logger.error("No feature data was produced.")
         sys.exit(1)
 
     final_dataset = pd.concat(all_features_dfs, ignore_index=True)
     final_dataset.to_csv(output_filepath, index=False)
-    logger.info(
-        f"Feature dataset saved to {output_filepath} "
-        f"({len(final_dataset)} rows, {len(final_dataset.columns)} columns)"
-    )
+    logger.info(f"Feature dataset saved to {output_filepath}")
 
 
 if __name__ == "__main__":
