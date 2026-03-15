@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 import logging
 from scipy.stats import skew, kurtosis
-from src.data.processing import ADC_DATA_START_INDEX
+from src.data.processing import ADC_DATA_START_INDEX, find_first_peak_index
 from src.data.kalman import apply_kalman_filter
 
 # Configure logging
@@ -46,14 +46,11 @@ def build_feature_dataset():
             adc_matrix = df.iloc[:, ADC_DATA_START_INDEX:].values
             adc_centered = adc_matrix - np.mean(adc_matrix, axis=1, keepdims=True)
             
-            # 1. Echo Detection
-            row_stds = np.std(adc_centered, axis=1, keepdims=True)
-            mask = np.abs(adc_centered) > (4 * row_stds)
+            # 1. Echo Detection (Using Professor's requested function)
             echo_indices = []
-            for row_mask in mask:
-                hits = np.where(row_mask)[0]
-                valid_hits = hits[hits > 20]
-                echo_indices.append(valid_hits[0] if len(valid_hits) > 0 else -1)
+            for row in adc_centered:
+                idx = find_first_peak_index(row, threshold_multiplier=4)
+                echo_indices.append(idx)
             echo_indices = np.array(echo_indices).astype(float)
 
             # 2. Spectral Features

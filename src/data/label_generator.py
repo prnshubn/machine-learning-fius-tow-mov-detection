@@ -1,6 +1,7 @@
 """
 Label Refinement Module: Generates binary ground truth labels (towards vs not_towards).
 Captures multiple movement bursts within a single session using dynamic thresholding.
+Now includes kinematic TTC (Time-to-Collision) calculation.
 """
 import pandas as pd
 import numpy as np
@@ -16,6 +17,7 @@ def refine_labels_by_distance():
     """
     Groups raw session data and applies sensitive velocity-based binary labeling.
     Captures all "towards" segments by using a lower noise floor.
+    Calculates Kinematic TTC: Distance / |Velocity|.
     """
     feature_dataset_path = 'data/processed/features.csv'
     output_filepath = 'data/processed/final_labeled_data.csv'
@@ -28,11 +30,12 @@ def refine_labels_by_distance():
     session_id_col = 'label'
     processed_groups = []
     
-    # --- INDUSTRY STRATEGY: High Sensitivity ---
-    # We lower the threshold to 0.05 to capture slow movement and the start/end of bursts.
+    # Constants for TTC
+    SPEED_OF_SOUND = 343.0 # m/s
+    SAMPLING_RATE = 1953125 # Hz
     VELOCITY_THRESHOLD = 0.05 
 
-    logger.info(f"Generating high-sensitivity binary labels (Threshold: {VELOCITY_THRESHOLD})...")
+    logger.info(f"Generating high-sensitivity binary labels and TTC (Threshold: {VELOCITY_THRESHOLD})...")
 
     for session_name, group_df in df.groupby(session_id_col):
         # Physical Velocity from Kalman Filter
@@ -51,20 +54,34 @@ def refine_labels_by_distance():
 
         group_df['motion'] = pd.Series(smoothed).astype(int).map({0: 'towards', 1: 'not_towards'}).values
         
-        # We no longer "trim" the start/end of the file to ensure we don't accidentally
-        # cut out a burst that happened very early or very late.
+        # --- TTC CALCULATION (Kinematic) ---
+        # Guard: Only calculate distance if a valid echo was detected (index >= 0)
+        group_df['calc_dist_m'] = np.where(
+            group_df['echo_index'] >= 0,
+            (group_df['echo_index'] / SAMPLING_RATE) * SPEED_OF_SOUND / 2.0,
+            np.nan
+        )
+        
+        # TTC = distance / |velocity|
+        # Only valid if moving towards (vel < 0) and distance is valid
+        group_df['ttc'] = np.where(
+            (group_df['motion'] == 'towards') & (np.abs(group_df['velocity']) > 0.01) & (~group_df['calc_dist_m'].isna()),
+            group_df['calc_dist_m'] / np.abs(group_df['velocity']),
+            np.nan
+        )
+
         processed_groups.append(group_df)
 
     final_df = pd.concat(processed_groups)
     final_df = final_df.rename(columns={session_id_col: 'session_id', 'motion': 'label'})
     
     dist = final_df['label'].value_counts()
-    logger.info("Final Label Distribution (High Sensitivity):")
+    logger.info("Final Label Distribution:")
     for label, count in dist.items():
         logger.info(f"  - {label}: {count}")
     
     final_df.to_csv(output_filepath, index=False)
-    logger.info(f"Expanded labeled dataset saved to {output_filepath}")
+    logger.info(f"Labeled dataset with TTC saved to {output_filepath}")
 
 if __name__ == "__main__":
     refine_labels_by_distance()
