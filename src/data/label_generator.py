@@ -47,6 +47,13 @@ def _kinematic_ttc(distance, velocity, acceleration):
     if distance <= 0 or np.isnan(distance):
         return np.nan
 
+    # Guard: only approaching objects (negative velocity) can have a valid TTC.
+    # Without this, a decelerating-away object (v > 0, a < 0) can produce a
+    # positive quadratic root that represents a hypothetical future turnaround —
+    # not a real imminent collision. That would corrupt the regression ground truth.
+    if velocity >= 0:
+        return np.nan
+
     # Linear fallback: Use simple t = -d/v if acceleration is negligible
     if abs(acceleration) < 1e-6:
         if abs(velocity) < 1e-6:

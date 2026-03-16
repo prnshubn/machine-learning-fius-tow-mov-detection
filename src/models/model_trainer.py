@@ -3,7 +3,7 @@ Master Model Trainer: High-Performance Collision Prediction Pipeline.
 
 This module implements a three-stage machine learning architecture:
 Stage 1 (Classification): Detects motion towards the sensor using One-Class 
-    Classification (OCC) algorithms.
+    Classification (OCC) algorithms: OCSVM, Isolation Forest, LOF, Autoencoder.
 Stage 2 (Regression): Predicts Time-to-Collision (TTC) using SVR.
 Stage 3 (Classification): Predicts Material Type to estimate Impact Force.
 
@@ -128,17 +128,21 @@ def train_master_pipeline():
     y_train_c, y_test_c = y_class.iloc[train_idx_c], y_class.iloc[test_idx_c]
     X_train_towards = X_train_c[y_train_c == 1]
 
+    # LocalOutlierFactor requires novelty=True to expose a predict() method on
+    # unseen data. Without it, LOF only supports fit_predict() on the training
+    # set itself and raises NotFittedError when called on X_test_c.
     occ_pipelines = {
         "One-Class SVM (nu=0.05)":    _make_pipeline(OneClassSVM(kernel='rbf', nu=0.05)),
-        "Isolation Forest (100 est)": _make_pipeline(IsolationForest(n_estimators=100,  contamination=0.1, random_state=42)),
+        "Isolation Forest (100 est)": _make_pipeline(IsolationForest(n_estimators=100, contamination=0.1, random_state=42)),
+        "LOF (k=20, novelty)":        _make_pipeline(LocalOutlierFactor(n_neighbors=20, contamination=0.1, novelty=True)),
         "Autoencoder (Narrow)":       _make_pipeline(AutoencoderDetector(hidden_layer_sizes=(4, 2, 4))),
     }
 
-    detailed_results = []
+    ml_results = []
     for name, pipe in occ_pipelines.items():
         pipe.fit(X_train_towards)
         y_pred = pipe.predict(X_test_c)
-        detailed_results.append({
+        ml_results.append({
             "Algorithm": name,
             "F1-Score":  f1_score(y_test_c, y_pred, pos_label=1, zero_division=0),
             "Accuracy":  accuracy_score(y_test_c, y_pred),
@@ -146,23 +150,34 @@ def train_master_pipeline():
             "Recall":    recall_score(y_test_c, y_pred, pos_label=1, zero_division=0),
         })
 
-    detailed_df = pd.DataFrame(detailed_results)
-    detailed_df.to_csv(os.path.join(REPORTS_DIR, 'detailed_algorithm_performance.csv'), index=False)
-    
-    best_idx = detailed_df['F1-Score'].idxmax()
-    best_algo_name = detailed_df.iloc[best_idx]['Algorithm']
-    logger.info(f"Best motion algorithm: {best_algo_name} (F1={detailed_df.iloc[best_idx]['F1-Score']:.4f})")
-    
-    # Save the best model
+    # --- Best model selection (ML pipelines only, before baseline is appended) ---
+    # The naive baseline must NOT participate in idxmax() — it is not a key in
+    # occ_pipelines, so picking it would cause a KeyError on the next line.
+    ml_df = pd.DataFrame(ml_results)
+    best_idx = ml_df['F1-Score'].idxmax()
+    best_algo_name = ml_df.iloc[best_idx]['Algorithm']
+    logger.info(f"Best motion algorithm: {best_algo_name} (F1={ml_df.iloc[best_idx]['F1-Score']:.4f})")
+
+    # Save best model and its confusion matrix.
     best_pipe = occ_pipelines[best_algo_name]
     joblib.dump(best_pipe, 'models/motion_detection_model.joblib')
 
-    # Save Confusion Matrix for the best model
     y_pred_best = best_pipe.predict(X_test_c)
     cm = confusion_matrix(y_test_c, y_pred_best, labels=[1, -1])
-    cm_df = pd.DataFrame(cm, index=['Actual: towards', 'Actual: not towards'], 
+    cm_df = pd.DataFrame(cm, index=['Actual: towards', 'Actual: not towards'],
                          columns=['Predicted: towards', 'Predicted: not towards'])
     cm_df.to_csv(os.path.join(REPORTS_DIR, 'confusion_matrix.csv'), index_label='Motion Label')
+
+    # Append naive baseline AFTER selection so it appears in the report but
+    # cannot be chosen as the production model.
+    test_index_labels = X_class.iloc[test_idx_c].index
+    baseline_row = _evaluate_naive_baseline(df, test_index_labels, y_test_c)
+    logger.info(f"Naive baseline F1={baseline_row['F1-Score']:.4f} (benchmark for ML uplift)")
+    ml_results.append(baseline_row)
+
+    pd.DataFrame(ml_results).to_csv(
+        os.path.join(REPORTS_DIR, 'detailed_algorithm_performance.csv'), index=False
+    )
     logger.info("Saved performance reports and confusion matrix.")
 
     # -----------------------------------------------------------------------

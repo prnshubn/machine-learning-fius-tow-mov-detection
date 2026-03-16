@@ -34,21 +34,19 @@ class AutoencoderDetector(BaseEstimator):
         """
         Initializes the Autoencoder architecture.
 
+        Only stores hyperparameters here — the MLPRegressor is intentionally
+        NOT built in __init__. sklearn's BaseEstimator.set_params() updates
+        instance attributes but cannot rebuild objects created at construction
+        time, so GridSearch / Pipeline cloning would silently use the wrong
+        architecture. Building the model inside fit() guarantees it always
+        reflects the current values of hidden_layer_sizes and threshold_quantile.
+
         Args:
             hidden_layer_sizes (tuple): Hidden layer configuration.
             threshold_quantile (float): Quantile of training error used as threshold.
         """
         self.hidden_layer_sizes = hidden_layer_sizes
         self.threshold_quantile = threshold_quantile
-        
-        # Use MLPRegressor as the engine for the Autoencoder
-        self.model = MLPRegressor(
-            hidden_layer_sizes=self.hidden_layer_sizes, 
-            activation='relu', 
-            solver='adam', 
-            max_iter=500, 
-            random_state=42
-        )
         self.threshold_ = None
 
     def fit(self, X, y=None):
@@ -62,6 +60,15 @@ class AutoencoderDetector(BaseEstimator):
         Returns:
             self
         """
+        # Build the MLPRegressor here so that any set_params() call made
+        # between construction and fitting is honoured correctly.
+        self.model = MLPRegressor(
+            hidden_layer_sizes=self.hidden_layer_sizes,
+            activation='relu',
+            solver='adam',
+            max_iter=500,
+            random_state=42,
+        )
         # Neural net learns the identity function: f(X) -> X
         self.model.fit(X, X)
         

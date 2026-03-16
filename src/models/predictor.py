@@ -26,7 +26,6 @@ from src.data.processing import (
     find_first_peak_index, extract_echo_shape_features,
 )
 from src.data.kalman import KalmanFilter
-from src.models.detectors import AutoencoderDetector
 
 WINDOWS = [5, 10, 25, 50]
 SPEED_OF_SOUND = 343.0
@@ -165,7 +164,11 @@ def main():
 
     # Final Reporting
     avg_latency = np.mean(frame_latencies) if frame_latencies else 0.0
-    sensor_period = (5 * 60 * 1000) / max(len(df_raw), 1)
+    # Derive the actual average inter-frame period from the recording timestamps
+    # rather than assuming a fixed 5-minute session length. This makes the
+    # real-time capability check correct regardless of recording duration.
+    actual_diffs = np.diff(timestamps_ms)
+    sensor_period = float(np.mean(actual_diffs[actual_diffs > 0])) if actual_diffs.size > 0 else 200.0
 
     print("\n" + "=" * 45)
     print("SIMULATION PERFORMANCE REPORT")

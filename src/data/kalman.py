@@ -133,6 +133,11 @@ def apply_kalman_filter(distances, timestamps, process_noise=0.01, measurement_n
     """
     Batch wrapper to apply the Kalman Filter to a full session array.
 
+    Each frame passes its actual elapsed time (dt) to the filter so that the
+    State Transition Matrix (F) is recomputed per-step. This is critical for
+    accurate velocity and acceleration estimates during training, which must
+    match the per-frame dt behaviour already used in the real-time predictor.
+
     Args:
         distances (np.ndarray): Array of raw distance measurements.
         timestamps (np.ndarray): Array of timestamps in milliseconds.
@@ -142,19 +147,31 @@ def apply_kalman_filter(distances, timestamps, process_noise=0.01, measurement_n
     Returns:
         tuple: (filtered_dist, filtered_vel, filtered_accel) as numpy arrays.
     """
+    distances  = np.asarray(distances,  dtype=float)
+    timestamps = np.asarray(timestamps, dtype=float)
+
     if len(distances) < 2:
-        return np.array(distances), np.zeros(len(distances)), np.zeros(len(distances))
+        return distances.copy(), np.zeros(len(distances)), np.zeros(len(distances))
 
-    # Calculate average time step for initialization
-    dt_avg = np.mean(np.diff(timestamps)) / 1000.0
-    if np.isnan(dt_avg) or dt_avg <= 0:
-        dt_avg = 0.045
+    # Per-frame dt in seconds (one value per inter-frame interval).
+    # dt_per_frame[i] is the elapsed time BEFORE frame i (undefined for frame 0).
+    dt_seconds = np.diff(timestamps) / 1000.0
 
-    kf = KalmanFilter(dt=dt_avg, process_noise=process_noise, measurement_noise=measurement_noise)
+    # Sanitise: replace non-positive or NaN intervals with the session median
+    # so a single bad timestamp doesn't corrupt the whole filter run.
+    median_dt = float(np.median(dt_seconds[dt_seconds > 0])) if np.any(dt_seconds > 0) else 0.045
+    dt_seconds = np.where((dt_seconds > 0) & np.isfinite(dt_seconds), dt_seconds, median_dt)
+
+    # Initialise filter with the median dt so the first F matrix is reasonable.
+    kf = KalmanFilter(dt=median_dt, process_noise=process_noise, measurement_noise=measurement_noise)
 
     f_dist, f_vel, f_accel = [], [], []
-    for d in distances:
-        d_val, v_val, a_val = kf.update(d)
+    for i, d in enumerate(distances):
+        # Frame 0: no previous timestamp → pass dt=None so the filter seeds its
+        # state from the measurement without running a predict step.
+        # Frames 1…N: pass the actual elapsed time so F is recomputed correctly.
+        dt_frame = None if i == 0 else dt_seconds[i - 1]
+        d_val, v_val, a_val = kf.update(d, dt=dt_frame)
         f_dist.append(d_val)
         f_vel.append(v_val)
         f_accel.append(a_val)

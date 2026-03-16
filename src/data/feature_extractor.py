@@ -111,9 +111,12 @@ def build_feature_dataset():
             frequencies  = np.fft.fftfreq(n_samples, d=1 / SAMPLING_RATE)[1:n_samples // 2]
             
             peak_freqs        = frequencies[np.argmax(magnitudes, axis=1)]
+            sum_magnitudes     = np.sum(magnitudes, axis=1)
+            # Guard: avoid division by zero for silent/dead frames (all-zero ADC rows)
+            sum_magnitudes[sum_magnitudes == 0] = 1e-10
             spectral_centroids = (
                 np.sum(frequencies * magnitudes, axis=1)
-                / np.sum(magnitudes, axis=1)
+                / sum_magnitudes
             )
 
             # Step 6: Temporal Quad-Scale Windowing
