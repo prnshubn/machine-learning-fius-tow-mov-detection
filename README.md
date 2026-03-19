@@ -428,3 +428,12 @@ If you want to continue developing this project, the highest-value follow-ups ar
 2. Fix the material-to-mass label mismatch in `predictor.py`.
 3. Add a small validation script that checks raw CSV schema, filename convention, and artifact freshness before training.
 4. Expand the dataset beyond four sessions before making stronger generalization claims.
+
+## Authors
+
+| Member | Name                      | GitHub ID                                                |
+| ------ | ------------------------- | -------------------------------------------------------- |
+| 1      | `Aditya Praveen Shidhaye` | [@axiomsbane](https://github.com/axiomsbane)             |
+| 2      | `Priyanshu Bandyopadhyay` | [@prnshubn](https://github.com/prnshubn)                 |
+| 3      | `Pradeep Buddhiram Patwa` | [@pradeeppatwa](https://github.com/pradeeppatwa)         |
+| 4      | `Akshay Ganesh Gudekar`   | [@Akshay-Gudekar](https://github.com/Akshay-Gudekar)     |
