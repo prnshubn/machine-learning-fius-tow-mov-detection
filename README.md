@@ -1,4 +1,4 @@
-# 🛡️ Acoustic Shield: Proactive Safety via Raw Ultrasonic Signal Analysis
+# Proactive Safety via Raw Ultrasonic Signal Analysis
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![ML Pipeline](https://img.shields.io/badge/Pipeline-Automated-green.svg)](run_pipeline.sh)
