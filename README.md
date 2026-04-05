@@ -70,7 +70,7 @@ If you are using this repository for coursework, reporting, or further developme
                                           |
                                           v
                    +----------------------+----------------------+
-                   | data/processed/final_labeled_data.csv      |
+                   | data/processed/final_labeled_data.csv       |
                    +----------------------+----------------------+
                                           |
                                           v
